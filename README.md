@@ -173,9 +173,6 @@ cd build
 
 If you use this code, please cite the relevant papers.
 
-## Technical Support
-
-For questions, please contact: [Your contact information]
 
 ---
 
