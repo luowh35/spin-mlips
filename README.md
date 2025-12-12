@@ -24,8 +24,8 @@ MagneticNEP_CPP/
 │   ├── model.cpp              # Model inference implementation
 │   └── main.cpp               # Example program entry
 ├── examples/              # Example files
-│   └── test.xyz               # Test structure file
-└── data/                  # Model file directory (user provided)
+    ├── test.xyz               # Test structure file
+    ├── pre.py    
     └── best_model_traced.pt   # TorchScript model file
 ```
 
@@ -66,13 +66,13 @@ MagneticNEP_CPP/
 If you haven't installed LibTorch and Eigen3, use the automatic installation script:
 
 ```bash
-# Automatically download and install all dependencies (no sudo required)
-chmod +x install_dependencies.sh
-./install_dependencies.sh
+# Automatically download and install all dependencies 
+chmod +x install.sh
+./install.sh
 
 # The script will download:
-#   - LibTorch 2.0.1 (~180MB compressed)
-#   - Eigen3 3.4.0 (~2.7MB)
+#   - LibTorch 2.0.1 
+#   - Eigen3 3.4.0 
 # And automatically build MagneticNEP
 ```
 
