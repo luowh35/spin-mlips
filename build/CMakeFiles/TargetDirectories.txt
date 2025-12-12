@@ -1,0 +1,3 @@
+/home/luowh/nep_spin/MagneticNEP_CPP/build/CMakeFiles/nep_inference.dir
+/home/luowh/nep_spin/MagneticNEP_CPP/build/CMakeFiles/edit_cache.dir
+/home/luowh/nep_spin/MagneticNEP_CPP/build/CMakeFiles/rebuild_cache.dir
