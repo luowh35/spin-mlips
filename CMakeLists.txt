@@ -55,7 +55,7 @@ if(TORCH_CUDA_FOUND)
 endif()
 
 # Copy test data to build directory
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/examples/test.xyz
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/example/test.xyz
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 
 # Output compilation information
