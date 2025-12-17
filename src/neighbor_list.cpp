@@ -65,7 +65,7 @@ NeighborList NeighborListBuilder::build(
                 // For full compatibility with Python ASE, we use an extended cutoff
                 // According to experimental measurements, for rc=4.1, ASE allows max distance of about 4.6945 Å
                 // i.e., cutoff_factor = 1.145
-                float ase_cutoff = cutoff * 1.145f;  // Precisely match ASE behavior
+                float ase_cutoff = cutoff * 1.0f;  // Precisely match ASE behavior
                 if (r <= ase_cutoff && r > 1e-8) {
                     center_list.push_back(i);
                     neighbor_list.push_back(j);

@@ -1,33 +1,39 @@
-# MagneticNEP C++ Inference Module
+# NEP-SPIN_CPU
 
-C++ inference implementation of MagneticNEP neural network potential, supporting energy, force, and magnetic force calculations for magnetic systems.
+# What does this repository contain?
 
-## File Structure
+* C++ inference implementation of MagneticNEP neural network potential, supporting energy, force, and magnetic force calculations for magnetic systems.
 
-```
-MagneticNEP_CPP/
-├── README.md              # This document
-├── CMakeLists.txt         # CMake build configuration
-├── include/               # Header files
-│   ├── nep_types.h            # Basic type definitions
-│   ├── math_utils.h           # Math utility functions
-│   ├── xyz_reader.h           # XYZ file reader
-│   ├── neighbor_list.h        # Neighbor list builder
-│   ├── cg_coefficients.h      # Clebsch-Gordan coefficients
-│   ├── descriptor.h           # ACE descriptor computation
-│   └── model.h                # Neural network model inference
-├── src/                   # Source code
-│   ├── math_utils.cpp         # Math utilities implementation
-│   ├── xyz_reader.cpp         # XYZ reader implementation
-│   ├── neighbor_list.cpp      # Neighbor list implementation
-│   ├── descriptor.cpp         # ACE descriptor implementation
-│   ├── model.cpp              # Model inference implementation
-│   └── main.cpp               # Example program entry
-├── examples/              # Example files
-    ├── test.xyz               # Test structure file
-    ├── pre.py    
-    └── best_model_traced.pt   # TorchScript model file
-```
+* An interface of the `NEP-SPIN` class to the CPU version of LAMMPS (https://github.com/lammps/lammps). **It can be run with MPI**.
+
+# The standalone C++ implementation of NEP-SPIN
+
+* The `NEP3` C++ class is defined in the following three files:
+  * `src/cg_coefficients.h `
+  * `src/descriptor.h`
+  * `src/math_utils.cpp`
+  * `src/model.cpp`
+  * `src/neighbor_list.cpp`
+  * `src/nep_types.h`
+  * `src/xyz_reader.h`
+  * `src/descriptor.cpp`
+  * `src/main.cpp`
+  * `src/math_utils.h`
+  * `src/model.h`
+  * `src/neighbor_list.h`
+  * `src/xyz_reader.cpp`
+
+                
+                       
+  
+
+* The following folders contain some testing code and results:
+  * `example/`
+  
+
+# The NEP-LAMMPS interface
+
+## Build the NEP-LAMMPS interface
 
 ## Requirements
 
@@ -59,120 +65,56 @@ MagneticNEP_CPP/
   # Then set: export EIGEN3_PATH=$(pwd)/eigen-3.4.0
   ```
 
-## Quick Build
+* step 1: Copy the files in `src/` into `interface/USER-NEP-SPIN/` such that you have the following files in `interface/USER-NEP-SPIN/`:
+  ```shell
+  make interface #copy the files into the interface/USER-NEP-SPIN/
+  make clean-interface #remove the files
+  ```
+  
+* Step 2: Now you can copy the `USER-NEP-SPIN/` folder into `YOUR_LAMMPS_PATH/src/` and start to compile LAMMPS in your favorite way. 
+  modify the Makefile (src/MAKE/Makefile.mpi):
+  ```shell
+  CCFLAGS = -g -O3 -std=c++17
+  LINKFLAGS = -g -O3 -std=c++17
+  
+  ...
 
-### Method 1: Automatic Installation (Recommended, No Sudo Required)
+  TORCH_PATH = /home/wjw106/luowh/nep_spin/libtorch
 
-If you haven't installed LibTorch and Eigen3, use the automatic installation script:
+  TORCH_INC = -I$(TORCH_PATH)/include \
+              -I$(TORCH_PATH)/include/torch/csrc/api/include
 
-```bash
-# Automatically download and install all dependencies 
-chmod +x install.sh
-./install.sh
+  TORCH_PATH_LIB = -L$(TORCH_PATH)/lib
 
-# The script will download:
-#   - LibTorch 2.0.1 
-#   - Eigen3 3.4.0 
-# And automatically build MagneticNEP
-```
+  TORCH_LIB = -ltorch \
+              -ltorch_cpu \
+              -lc10 \
+              -Wl,-rpath,$(TORCH_PATH)/lib
+  
+  JPG_INC = $(TORCH_INC)
+  JPG_PATH = $(TORCH_PATH_LIB)
+  JPG_LIB = $(TORCH_LIB)
+  ```
+  after modified the makefile, in your/lammps/src:
+  ```shell
+  make yes-spin
+  make yes-user-nep-spin
+  make mpi -j4
+  ```
 
-### Method 2: Manual Build (Dependencies Already Installed)
+## Use the NEP-LAMMPS interface
 
-If you have already installed LibTorch and Eigen3, use the provided build script:
+* `atom_style` can only be `spin`
+* `units` must be `metal`
+* Specify the `pair_style` in the following way:
+  ```shell
+  pair_style nep   # YOUR_NEP_MODEL_FILE.txt is your NEP model file (with path)
+  pair_coeff * * YOUR_NEP_MODEL_FILE.pt Cr I                        # This format is fixed
+  ```
+  
 
-```bash
-# The build script is already configured
-chmod +x build.sh
-./build.sh
-```
+# Citation
 
-Or manually build:
+* If you directly or indirectly use the `NEP-SPIN` class here, you are suggested to cite the following paper:
 
-```bash
-# 1. Create build directory
-mkdir build && cd build
-
-# 2. Configure CMake (set LibTorch path)
-cmake -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_PREFIX_PATH=/path/to/libtorch \
-      -DEIGEN3_INCLUDE_DIR=/path/to/eigen-3.4.0 \
-      ..
-
-# 3. Build
-make -j4
-
-# 4. Run
-./nep_inference
-```
-
-## Usage Example
-
-### Prepare Model File
-
-Convert your trained PyTorch model to TorchScript format:
-
-```python
-import torch
-
-# Load your model
-model = YourMagneticNEPModel(...)
-model.load_state_dict(torch.load('best_model.pth'))
-model.eval()
-
-# Convert to TorchScript
-traced_model = torch.jit.trace(model, example_input)
-traced_model.save('best_model_traced.pt')
-```
-
-Place `best_model_traced.pt` in the `data/` directory.
-
-### Run Inference
-
-```bash
-cd build
-./nep_inference
-
-# Default uses:
-# - Model: ../example/best_model_traced.pt
-# - Structure: ../example/test.xyz
-```
-
-
-## Common Issues
-
-### Build Errors
-
-**Q: "Could not find Torch"**
-- A: Ensure `CMAKE_PREFIX_PATH` is set to the LibTorch directory
-
-**Q: "undefined reference to torch::xxx"**
-- A: Check that you're using the correct ABI version (cxx11 vs pre-cxx11)
-
-**Q: "Eigen/Core: No such file"**
-- A: Install Eigen3 or set `EIGEN3_INCLUDE_DIR`
-
-### Runtime Errors
-
-**Q: "error loading model"**
-- A: Ensure the model file is in TorchScript format (.pt file)
-
-**Q: Energy/forces inconsistent with Python version**
-- A: Check that descriptor configuration matches training parameters exactly
-
-**Q: "Descriptor dimension mismatch"**
-- A: Model expects different descriptor dimension, check n_max, l_max parameters
-
-## Performance Optimization
-
-- Build in Release mode: `-DCMAKE_BUILD_TYPE=Release`
-- Enable compiler optimizations: `-O3 -march=native`
-- Multi-threaded LibTorch: set `torch::set_num_threads(4)`
-- Batch computation: process multiple structures at once
-
-## License and Citation
-
-If you use this code, please cite the relevant papers.
-
-
----
 

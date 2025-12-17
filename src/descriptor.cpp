@@ -39,8 +39,6 @@ MagneticACEDescriptor::MagneticACEDescriptor(const DescriptorConfig& config)
 
     // Initialize CG coefficients
     CGCoefficients::initialize();
-
-    std::cout << "✓ Descriptor initialized: dimension = " << descriptor_dimension_ << std::endl;
 }
 
 void MagneticACEDescriptor::init_angular_dimensions() {
@@ -106,15 +104,12 @@ torch::Tensor MagneticACEDescriptor::compute_from_precomputed_neighbors(
     int n_pairs = neighbors.n_pairs;
     auto device = positions.device();
 
-    std::cout << "Computing descriptors for " << n_total_atoms << " atoms with "
-              << n_pairs << " neighbor pairs..." << std::endl;
-
     if (n_pairs == 0) {
         return torch::zeros({n_total_atoms, descriptor_dimension_},
                            torch::TensorOptions().dtype(torch::kFloat32).device(device));
     }
 
-    // 处理磁矩维度
+    // Handle magnetic moment dimension
     torch::Tensor magmoms_3d;
     if (magmoms.dim() == 1) {
         magmoms_3d = torch::zeros_like(positions);
@@ -166,8 +161,6 @@ torch::Tensor MagneticACEDescriptor::compute_from_precomputed_neighbors(
     auto B_Mj = magnetic_basis(mag_j_norm);  // [n_max, n_pairs]
     auto B_Z = species_encoding(numbers_j);  // [n_elements, n_pairs]
 
-    std::cout << "  Computed basis functions" << std::endl;
-
     // 6. Compute spherical harmonics for central atom magnetic moments
     auto [theta_m_i, phi_m_i, is_zero_m_i] = MathUtils::cartesian_to_spherical(
         magmoms_3d, false, pos_noise_threshold_, mag_noise_threshold_, pole_threshold_, epsilon_
@@ -181,8 +174,6 @@ torch::Tensor MagneticACEDescriptor::compute_from_precomputed_neighbors(
     // phi = B_R ⊗ B_Mj ⊗ B_Z
     auto non_angular_phi = torch::einsum("ip,jp,kp->pijk", {B_R, B_Mj, B_Z});
     non_angular_phi = non_angular_phi.reshape({n_pairs, -1}).t();  // [n_channels_j, n_pairs]
-
-    std::cout << "  Built non-angular phi" << std::endl;
 
     // 8. Angular coupling
     auto angular_phi_dict = couple_phi_tensors(Y_r_all, Y_m_j_all);
@@ -200,8 +191,6 @@ torch::Tensor MagneticACEDescriptor::compute_from_precomputed_neighbors(
                           phi_j_weighted);
 
     auto A_i = A_i_flat.reshape({n_channels_j_, n_angular_total_A_, n_total_atoms});
-
-    std::cout << "  Aggregated A_i tensors" << std::endl;
 
     // 10. Build M_i tensor
     auto angular_M = pack_tensors_to_matrix(Y_m_i_all, l_max_, n_total_atoms);
@@ -222,8 +211,6 @@ torch::Tensor MagneticACEDescriptor::compute_from_precomputed_neighbors(
         D_i_list.push_back(M_i_dict[0].squeeze(1));
     }
 
-    std::cout << "  Added nu=1 components" << std::endl;
-
     // nu=2: Invariants
     if (nu_max_ >= 2) {
         auto D_AA_list = compute_invariants(A_i_dict, A_i_dict, true, true, l_phi_max_, n_total_atoms);
@@ -235,8 +222,6 @@ torch::Tensor MagneticACEDescriptor::compute_from_precomputed_neighbors(
         if (!D_MA_list.empty()) {
             D_i_list.push_back(pos_scale_ * torch::cat(D_MA_list, 0));
         }
-
-        std::cout << "  Added position invariants" << std::endl;
 
         // Spin invariants
         if (use_spin_invariants_) {
@@ -267,8 +252,6 @@ torch::Tensor MagneticACEDescriptor::compute_from_precomputed_neighbors(
             if (!D_MS_list.empty()) {
                 D_i_list.push_back(spin_scale_ * torch::cat(D_MS_list, 0));
             }
-
-            std::cout << "  Added spin invariants" << std::endl;
         }
     }
 
@@ -277,13 +260,11 @@ torch::Tensor MagneticACEDescriptor::compute_from_precomputed_neighbors(
                            torch::TensorOptions().dtype(torch::kFloat32).device(device));
     }
 
-    // 连接所有描述符（仍然是复数）
+    // Concatenate all descriptors (still complex)
     auto descriptors_complex = torch::cat(D_i_list, 0).t();  // [n_atoms, descriptor_dim]
 
-    // 最后一步取实部，这样可以保留梯度链
+    // Take real part at the last step to preserve gradient chain
     auto descriptors = torch::real(descriptors_complex);
-
-    std::cout << "✓ Descriptors computed: shape = " << descriptors.sizes() << std::endl;
 
     return descriptors;
 }
@@ -347,7 +328,7 @@ std::map<int, torch::Tensor> MagneticACEDescriptor::couple_two_tensors(
 
             result[L].index_put_({idx_out},
                                 result[L].index({idx_out}) +
-                                term.coeff * Y1.at(l1).index({idx1}) * torch::conj(Y2.at(l2).index({idx2})));
+                                term.coeff * Y1.at(l1).index({idx1}) * Y2.at(l2).index({idx2}));
         }
     }
 
@@ -419,13 +400,13 @@ std::vector<torch::Tensor> MagneticACEDescriptor::compute_invariants(
             auto t1 = T1.at(l).index({torch::indexing::Slice(), m1_idx, torch::indexing::Slice()});  // [n_ch1, n_atoms]
             auto t2 = T2.at(l).index({torch::indexing::Slice(), m2_idx, torch::indexing::Slice()});  // [n_ch2, n_atoms]
 
-            // CG coupling: <T1 ⊗ T2> = Σ CG * T1 * conj(T2)
-            // Key: T2 must be conjugated!
-            inv += term.coeff * t1.unsqueeze(1) * torch::conj(t2.unsqueeze(0));
+            // CG coupling: <T1 ⊗ T2> = Σ CG * T1 * T2
+            // Consistent with Python version - no conjugation
+            inv += term.coeff * t1.unsqueeze(1) * t2.unsqueeze(0);
         }
 
         if (is_self_coupling) {
-            // 只保留上三角
+            // Keep only upper triangular
             std::vector<int64_t> idx0_vec, idx1_vec;
             for (int i = 0; i < n_ch1; ++i) {
                 for (int j = i; j < n_ch2; ++j) {

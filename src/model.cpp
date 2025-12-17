@@ -13,8 +13,6 @@ MagneticNEPModel::MagneticNEPModel(
         module_ = torch::jit::load(model_path);
         module_.to(device_);
         module_.eval();  // Set to evaluation mode
-
-        std::cout << "✓ Model loaded successfully from " << model_path << std::endl;
     } catch (const c10::Error& e) {
         throw std::runtime_error("Error loading model: " + std::string(e.what()));
     }

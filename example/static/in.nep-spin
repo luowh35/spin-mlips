@@ -1,0 +1,26 @@
+# LAMMPS input script for testing NEP-SPIN pair_style
+# Tests static energy calculation
+
+units           metal
+atom_style      spin
+boundary        p p p
+newton          on
+
+# Read data file with spin information
+read_data       test_spin.data
+
+# Define NEP-SPIN pair style
+pair_style      spin/nep
+pair_coeff      * * best_model_traced.pt Cr I 
+
+# Neighbor settings
+neighbor        0.5 bin
+neigh_modify    delay 0 every 1 check yes
+
+# Compute energy
+thermo_style    custom step pe ke etotal temp
+thermo          1
+
+# Single point energy calculation
+run             0
+

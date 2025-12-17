@@ -180,18 +180,24 @@ MathUtils::spherical_harmonics(
             // Convert P to complex type
             auto P_complex = torch::complex(P_lm[{l, abs_m}], torch::zeros_like(P_lm[{l, abs_m}]));
 
-            auto Y_lm_val = norm_factor * P_complex * exp_im_phi;
+            torch::Tensor Y_lm_val;
 
-            // Apply Condon-Shortley phase for m<0
-            if (m < 0) {
+            // For m >= 0: Y_l^m = norm * P_l^m * exp(i*m*phi)
+            // For m < 0: Y_l^{-|m|} = (-1)^|m| * conj(Y_l^{|m|})
+            //          = (-1)^|m| * norm * P_l^|m| * exp(-i*|m|*phi)
+            // Note: exp(i*m*phi) with m<0 already gives exp(-i*|m|*phi)
+            // So we only need to multiply by (-1)^|m| phase factor
+            if (m >= 0) {
+                Y_lm_val = norm_factor * P_complex * exp_im_phi;
+            } else {
                 float phase = std::pow(-1.0f, abs_m);
-                Y_lm_val = phase * torch::conj(Y_lm_val);
+                Y_lm_val = phase * norm_factor * P_complex * exp_im_phi;
             }
 
             Y_l_components.push_back(Y_lm_val);
         }
 
-        // Stack成 [2l+1, N] 形状
+        // Stack into [2l+1, N] shape
         Y_lm[l] = torch::stack(Y_l_components, 0);
     }
 

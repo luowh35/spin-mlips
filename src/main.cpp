@@ -15,7 +15,7 @@ int main(int argc, char* argv[]) {
     std::cout << std::string(60, '=') << std::endl;
 
     // ========== Configuration ==========
-    std::string model_path = "../example/best_model_traced.pt";
+    std::string model_path = "../example/best_model1.pt";
     std::string xyz_path = "../example/test.xyz";
 
     // Device selection

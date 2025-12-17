@@ -116,7 +116,7 @@ std::vector<AtomicSystem> XYZReader::read_all_frames(const std::string& filename
         system.n_atoms = n_atoms;
         parse_comment_line(line, system);
 
-        // 解析Properties
+        // Parse Properties
         std::vector<std::string> properties;
         if (line.find("Properties=") != std::string::npos) {
             size_t start = line.find("Properties=");
@@ -135,7 +135,7 @@ std::vector<AtomicSystem> XYZReader::read_all_frames(const std::string& filename
             parse_atom_line(line, properties, elements, positions, magmoms, forces);
         }
 
-        // 转换为tensor
+        // Convert to tensor
         std::vector<int64_t> numbers;
         for (const auto& elem : elements) {
             numbers.push_back(element_to_number(elem));
@@ -149,7 +149,7 @@ std::vector<AtomicSystem> XYZReader::read_all_frames(const std::string& filename
                           .clone().to(device);
         system.elements = elements;
 
-        // NaN清洗
+        // NaN cleanup
         system.positions = torch::nan_to_num(system.positions, 0.0, 0.0, 0.0);
         system.magmoms = torch::nan_to_num(system.magmoms, 0.0, 0.0, 0.0);
 
@@ -207,7 +207,7 @@ torch::Tensor XYZReader::parse_lattice(const std::string& lattice_str) {
         cell_data.push_back(std::stof(v));
     }
 
-    // 创建3x3矩阵
+    // Create 3x3 matrix
     return torch::from_blob(cell_data.data(), {3, 3}, torch::kFloat32).clone();
 }
 
