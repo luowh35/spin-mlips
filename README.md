@@ -108,7 +108,7 @@
 * `units` must be `metal`
 * Specify the `pair_style` in the following way:
   ```shell
-  pair_style nep   # YOUR_NEP_MODEL_FILE.txt is your NEP model file (with path)
+  pair_style spin/nep   # YOUR_NEP_MODEL_FILE.txt is your NEP model file (with path)
   pair_coeff * * YOUR_NEP_MODEL_FILE.pt Cr I                        # This format is fixed
   ```
   
