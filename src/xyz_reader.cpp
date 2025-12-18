@@ -245,7 +245,7 @@ void XYZReader::parse_atom_line(
     std::vector<float>& magmoms,
     std::vector<float>& forces
 ) {
-    // Split by TAB first
+    // Try TAB first, then fallback to space-separated
     auto tokens = split(trim(line), '\t');
 
     // Filter empty tokens
@@ -258,11 +258,13 @@ void XYZReader::parse_atom_line(
 
     if (filtered.empty()) return;
 
-    // First token is element symbol
-    elements.push_back(filtered[0]);
-
-    // Second TAB field contains position and force (space-separated)
+    // Check if TAB-separated format worked (multiple fields)
     if (filtered.size() >= 2) {
+        // TAB-separated format
+        // First token is element symbol
+        elements.push_back(filtered[0]);
+
+        // Second TAB field contains position and force (space-separated)
         auto pos_force_tokens = split(filtered[1], ' ');
         std::vector<std::string> pos_force_filtered;
         for (const auto& t : pos_force_tokens) {
@@ -284,18 +286,59 @@ void XYZReader::parse_atom_line(
             forces.push_back(std::stof(pos_force_filtered[4]));
             forces.push_back(std::stof(pos_force_filtered[5]));
         }
-    }
 
-    // Magnetic moment: 3rd-5th TAB fields
-    if (filtered.size() >= 5) {
-        magmoms.push_back(std::stof(filtered[2]));
-        magmoms.push_back(std::stof(filtered[3]));
-        magmoms.push_back(std::stof(filtered[4]));
+        // Magnetic moment: 3rd-5th TAB fields
+        if (filtered.size() >= 5) {
+            magmoms.push_back(std::stof(filtered[2]));
+            magmoms.push_back(std::stof(filtered[3]));
+            magmoms.push_back(std::stof(filtered[4]));
+        } else {
+            // Default magnetic moment to 0
+            magmoms.push_back(0.0f);
+            magmoms.push_back(0.0f);
+            magmoms.push_back(0.0f);
+        }
     } else {
-        // Default magnetic moment to 0
-        magmoms.push_back(0.0f);
-        magmoms.push_back(0.0f);
-        magmoms.push_back(0.0f);
+        // Space-separated format (fallback)
+        // Format: Element x y z mx my mz [fx fy fz ...]
+        auto space_tokens = split(trim(line), ' ');
+        std::vector<std::string> space_filtered;
+        for (const auto& t : space_tokens) {
+            if (!trim(t).empty()) {
+                space_filtered.push_back(trim(t));
+            }
+        }
+
+        if (space_filtered.empty()) return;
+
+        // First token is element symbol
+        elements.push_back(space_filtered[0]);
+
+        // Position: columns 1-3
+        if (space_filtered.size() >= 4) {
+            positions.push_back(std::stof(space_filtered[1]));
+            positions.push_back(std::stof(space_filtered[2]));
+            positions.push_back(std::stof(space_filtered[3]));
+        }
+
+        // Magnetic moment: columns 4-6
+        if (space_filtered.size() >= 7) {
+            magmoms.push_back(std::stof(space_filtered[4]));
+            magmoms.push_back(std::stof(space_filtered[5]));
+            magmoms.push_back(std::stof(space_filtered[6]));
+        } else {
+            // Default magnetic moment to 0
+            magmoms.push_back(0.0f);
+            magmoms.push_back(0.0f);
+            magmoms.push_back(0.0f);
+        }
+
+        // Force: columns 7-9 (if available)
+        if (space_filtered.size() >= 10) {
+            forces.push_back(std::stof(space_filtered[7]));
+            forces.push_back(std::stof(space_filtered[8]));
+            forces.push_back(std::stof(space_filtered[9]));
+        }
     }
 }
 

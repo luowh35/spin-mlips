@@ -44,6 +44,21 @@ PairNEPSpin::PairNEPSpin(LAMMPS *lmp) : PairSpin(lmp), device_(torch::kCPU)
   one_coeff = 1;
   manybody_flag = 1;
 
+  // Auto-detect GPU and use if available
+  if (torch::cuda::is_available()) {
+    int num_gpus = torch::cuda::device_count();
+    int gpu_id = comm->me % num_gpus;  // Distribute MPI ranks across GPUs
+    device_ = torch::Device(torch::kCUDA, gpu_id);
+    if (comm->me == 0) {
+      utils::logmesg(lmp, "NEP-SPIN: {} CUDA GPU(s) detected, using GPU acceleration\n", num_gpus);
+    }
+  } else {
+    device_ = torch::kCPU;
+    if (comm->me == 0) {
+      utils::logmesg(lmp, "NEP-SPIN: No CUDA GPU detected, using CPU\n");
+    }
+  }
+
   model_loaded_ = false;
   forces_cached_ = false;
   sp_magnitude_ = nullptr;
@@ -51,7 +66,7 @@ PairNEPSpin::PairNEPSpin(LAMMPS *lmp) : PairSpin(lmp), device_(torch::kCPU)
   m_cut_ = 3.5;
 
   // Default descriptor config
-  descriptor_config_.rc = 4.1f;
+  descriptor_config_.rc = 4.7f;
   descriptor_config_.n_max = 5;
   descriptor_config_.l_max = 3;
   descriptor_config_.nu_max = 2;
@@ -344,7 +359,10 @@ void PairNEPSpin::compute(int eflag, int vflag)
     cached_mag_forces_ = mag_forces_tensor.detach().clone();
     forces_cached_ = true;
 
-    // 12. Energy accounting
+    // 13. Cache current spin state for detecting changes in compute_single_pair
+    cache_current_spins();
+
+    // 14. Energy accounting
     if (eflag_global) {
       eng_vdwl = total_energy.item<double>();
     }
@@ -368,6 +386,11 @@ void PairNEPSpin::compute(int eflag, int vflag)
 
 void PairNEPSpin::compute_single_pair(int ii, double fmi[3])
 {
+  // Check if spins have changed since last compute - if so, recompute forces
+  if (!forces_cached_ || spins_changed()) {
+    recompute_forces();
+  }
+
   if (!forces_cached_) {
     return;
   }
@@ -382,8 +405,9 @@ void PairNEPSpin::compute_single_pair(int ii, double fmi[3])
     return;
   }
 
-  // Get cached magnetic force for atom ii
-  auto mag_force_accessor = cached_mag_forces_.accessor<float, 2>();
+  // Get cached magnetic force for atom ii (ensure on CPU for accessor)
+  auto mag_forces_cpu = cached_mag_forces_.cpu();
+  auto mag_force_accessor = mag_forces_cpu.accessor<float, 2>();
 
   // Convert dE/dM to LAMMPS fm format
   // NEP-SPIN computes dE/dM where M = |M| * s (s = unit spin vector)
@@ -400,7 +424,8 @@ void PairNEPSpin::compute_single_pair(int ii, double fmi[3])
 torch::Tensor PairNEPSpin::convert_positions(int ntotal)
 {
   double **x = atom->x;
-  auto options = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+  // Create on CPU first, then move to target device
+  auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
   auto positions = torch::zeros({ntotal, 3}, options);
   auto pos_accessor = positions.accessor<float, 2>();
 
@@ -410,7 +435,7 @@ torch::Tensor PairNEPSpin::convert_positions(int ntotal)
     pos_accessor[i][2] = static_cast<float>(x[i][2]);
   }
 
-  return positions;
+  return positions.to(device_);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -418,7 +443,8 @@ torch::Tensor PairNEPSpin::convert_positions(int ntotal)
 torch::Tensor PairNEPSpin::convert_types(int ntotal)
 {
   int *type = atom->type;
-  auto options = torch::TensorOptions().dtype(torch::kInt64).device(device_);
+  // Create on CPU first, then move to target device
+  auto options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
   auto numbers = torch::zeros({ntotal}, options);
   auto num_accessor = numbers.accessor<int64_t, 1>();
 
@@ -429,7 +455,7 @@ torch::Tensor PairNEPSpin::convert_types(int ntotal)
     num_accessor[i] = nep::element_to_number(elem);
   }
 
-  return numbers;
+  return numbers.to(device_);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -437,7 +463,8 @@ torch::Tensor PairNEPSpin::convert_types(int ntotal)
 torch::Tensor PairNEPSpin::convert_spins_to_magmoms(int ntotal)
 {
   double **sp = atom->sp;
-  auto options = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+  // Create on CPU first, then move to target device
+  auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
   auto magmoms = torch::zeros({ntotal, 3}, options);
   auto mag_accessor = magmoms.accessor<float, 2>();
 
@@ -452,14 +479,15 @@ torch::Tensor PairNEPSpin::convert_spins_to_magmoms(int ntotal)
     mag_accessor[i][2] = static_cast<float>(sp[i][2] * mag);
   }
 
-  return magmoms;
+  return magmoms.to(device_);
 }
 
 /* ---------------------------------------------------------------------- */
 
 torch::Tensor PairNEPSpin::get_cell_tensor()
 {
-  auto options = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+  // Create on CPU first, then move to target device
+  auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
   auto cell = torch::zeros({3, 3}, options);
   auto cell_accessor = cell.accessor<float, 2>();
 
@@ -490,7 +518,7 @@ torch::Tensor PairNEPSpin::get_cell_tensor()
     cell_accessor[2][2] = static_cast<float>(boxhi[2] - boxlo[2]);
   }
 
-  return cell;
+  return cell.to(device_);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -532,16 +560,16 @@ nep::NeighborList PairNEPSpin::build_neighbor_list_from_lammps(int ntotal)
   }
 
   if (total_pairs == 0) {
-    result.center_indices = torch::zeros({0}, torch::kInt64);
-    result.neighbor_indices = torch::zeros({0}, torch::kInt64);
-    result.shifts = torch::zeros({0, 3}, torch::kFloat32);
-    result.batch_idx = torch::zeros({ntotal}, torch::kInt64);
+    result.center_indices = torch::zeros({0}, torch::kInt64).to(device_);
+    result.neighbor_indices = torch::zeros({0}, torch::kInt64).to(device_);
+    result.shifts = torch::zeros({0, 3}, torch::kFloat32).to(device_);
+    result.batch_idx = torch::zeros({ntotal}, torch::kInt64).to(device_);
     return result;
   }
 
-  // Allocate tensors
-  auto options_int = torch::TensorOptions().dtype(torch::kInt64).device(device_);
-  auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+  // Allocate tensors on CPU first for filling with accessor
+  auto options_int = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
+  auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
 
   result.center_indices = torch::zeros({total_pairs}, options_int);
   result.neighbor_indices = torch::zeros({total_pairs}, options_int);
@@ -580,6 +608,12 @@ nep::NeighborList PairNEPSpin::build_neighbor_list_from_lammps(int ntotal)
       }
     }
   }
+
+  // Move tensors to target device
+  result.center_indices = result.center_indices.to(device_);
+  result.neighbor_indices = result.neighbor_indices.to(device_);
+  result.shifts = result.shifts.to(device_);
+  result.batch_idx = result.batch_idx.to(device_);
 
   result.n_pairs = total_pairs;
   return result;
@@ -642,5 +676,130 @@ void PairNEPSpin::distribute_magnetic_forces(const torch::Tensor &mag_forces, in
       fm[i][1] -= mag * static_cast<double>(mag_accessor[i][1]) / hbar;
       fm[i][2] -= mag * static_cast<double>(mag_accessor[i][2]) / hbar;
     }
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+
+void PairNEPSpin::cache_current_spins()
+{
+  double **sp = atom->sp;
+  int nlocal = atom->nlocal;
+
+  cached_spins_.resize(nlocal * 4);
+  for (int i = 0; i < nlocal; i++) {
+    cached_spins_[i*4 + 0] = sp[i][0];
+    cached_spins_[i*4 + 1] = sp[i][1];
+    cached_spins_[i*4 + 2] = sp[i][2];
+    cached_spins_[i*4 + 3] = sp[i][3];
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+
+bool PairNEPSpin::spins_changed()
+{
+  double **sp = atom->sp;
+  int nlocal = atom->nlocal;
+
+  // If cache size doesn't match, spins definitely changed
+  if (cached_spins_.size() != static_cast<size_t>(nlocal * 4)) {
+    return true;
+  }
+
+  // Check if any local spin component has changed significantly
+  const double tol = 0.001;
+  for (int i = 0; i < nlocal; i++) {
+    if (std::abs(sp[i][0] - cached_spins_[i*4 + 0]) > tol ||
+        std::abs(sp[i][1] - cached_spins_[i*4 + 1]) > tol ||
+        std::abs(sp[i][2] - cached_spins_[i*4 + 2]) > tol ||
+        std::abs(sp[i][3] - cached_spins_[i*4 + 3]) > tol) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* ---------------------------------------------------------------------- */
+
+void PairNEPSpin::recompute_forces()
+{
+  // Recompute magnetic forces with current spin configuration
+  // This is called when compute_single_pair detects spin changes
+
+  if (!model_loaded_) {
+    return;
+  }
+
+  int nlocal = atom->nlocal;
+  int nghost = atom->nghost;
+  int ntotal = nlocal + nghost;
+
+  try {
+    // 1. Convert current positions
+    auto positions = convert_positions(ntotal);
+
+    // 2. Convert atom types
+    auto numbers = convert_types(ntotal);
+
+    // 3. Convert current spins to magnetic moments
+    auto magmoms = convert_spins_to_magmoms(ntotal);
+
+    // 4. Get simulation cell
+    auto cell = get_cell_tensor();
+
+    // Enable gradients for magnetic force computation
+    positions.set_requires_grad(false);  // Don't need position gradients
+    magmoms.set_requires_grad(true);
+
+    // 5. Build neighbor list
+    auto neighbors = build_neighbor_list_from_lammps(ntotal);
+
+    if (neighbors.n_pairs == 0) {
+      cached_mag_forces_ = torch::zeros({ntotal, 3}, torch::kFloat32);
+      forces_cached_ = true;
+      cache_current_spins();
+      return;
+    }
+
+    // 6. Compute descriptors
+    auto descriptors_all = descriptor_->compute_from_precomputed_neighbors(
+        positions, numbers, magmoms, neighbors, cell);
+
+    // 7. Extract local atoms' descriptors
+    auto descriptors = descriptors_all.slice(0, 0, nlocal);
+
+    // 8. Run model inference
+    std::vector<torch::jit::IValue> inputs;
+    inputs.push_back(descriptors);
+    auto atomic_energies = model_.forward(inputs).toTensor();
+
+    // Sum to get total energy
+    auto total_energy = atomic_energies.sum();
+
+    // 9. Compute magnetic force gradients only
+    auto grads = torch::autograd::grad(
+        {total_energy},
+        {magmoms},
+        /*grad_outputs=*/{},
+        /*retain_graph=*/false,
+        /*create_graph=*/false,
+        /*allow_unused=*/true);
+
+    auto mag_forces_tensor = grads[0];  // dE/dM
+
+    // 10. Cache the new magnetic forces
+    cached_mag_forces_ = mag_forces_tensor.detach().clone();
+    forces_cached_ = true;
+
+    // 11. Update cached spin state
+    cache_current_spins();
+
+  } catch (const c10::Error &e) {
+    error->warning(FLERR, "PyTorch error in NEP-SPIN recompute_forces: {}", e.what());
+    forces_cached_ = false;
+  } catch (const std::exception &e) {
+    error->warning(FLERR, "Error in NEP-SPIN recompute_forces: {}", e.what());
+    forces_cached_ = false;
   }
 }

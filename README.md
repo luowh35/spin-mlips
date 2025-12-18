@@ -79,7 +79,7 @@
   
   ...
 
-  TORCH_PATH = /home/wjw106/luowh/nep_spin/libtorch
+  TORCH_PATH = /home//your_libtorch_path/
 
   TORCH_INC = -I$(TORCH_PATH)/include \
               -I$(TORCH_PATH)/include/torch/csrc/api/include

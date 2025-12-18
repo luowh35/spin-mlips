@@ -84,6 +84,12 @@ class PairNEPSpin : public PairSpin {
   torch::Tensor cached_mag_forces_;
   bool forces_cached_;
 
+  // Spin state tracking for detecting when recomputation is needed
+  std::vector<double> cached_spins_;  // Cached spin state [nlocal*4]
+  bool spins_changed();               // Check if spins have changed since last compute
+  void cache_current_spins();         // Store current spin state
+  void recompute_forces();            // Recompute forces with current spin configuration
+
   // Internal methods
   void allocate() override;
   void load_model(const std::string &path);

@@ -15,7 +15,7 @@ int main(int argc, char* argv[]) {
     std::cout << std::string(60, '=') << std::endl;
 
     // ========== Configuration ==========
-    std::string model_path = "../example/best_model1.pt";
+    std::string model_path = "../example/best_model_new.pt";
     std::string xyz_path = "../example/test.xyz";
 
     // Device selection
@@ -30,7 +30,7 @@ int main(int argc, char* argv[]) {
     // Descriptor configuration (consistent with Python version)
     DescriptorConfig config;
     config.elements = {"Cr", "I"};
-    config.rc = 4.1f;
+    config.rc = 4.7f;
     config.n_max = 5;
     config.l_max = 3;
     config.nu_max = 2;
