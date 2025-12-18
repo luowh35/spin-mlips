@@ -71,7 +71,8 @@ def parse_extended_xyz(filepath):
             my_dir = My / mag
             mz_dir = Mz / mag
         else:
-            mx_dir = my_dir = mz_dir = mag = 0.0
+            mx_dir = my_dir = mag = 0.0
+            mz_dir = 1.000
         atoms.append((symbol, x, y, z, mx_dir, my_dir, mz_dir, mag))
 
     return natoms, lattice, title, atoms
