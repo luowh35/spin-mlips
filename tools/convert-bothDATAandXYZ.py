@@ -66,7 +66,7 @@ def parse_extended_xyz(filepath):
         x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
         Mx, My, Mz = float(parts[4]), float(parts[5]), float(parts[6])
         mag = math.sqrt(Mx**2 + My**2 + Mz**2)
-        if mag > 1e-8:
+        if mag > 1e-4:
             mx_dir = Mx / mag
             my_dir = My / mag
             mz_dir = Mz / mag
