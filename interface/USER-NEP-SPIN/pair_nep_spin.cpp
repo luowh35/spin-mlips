@@ -528,35 +528,16 @@ nep::NeighborList PairNEPSpin::build_neighbor_list_from_lammps(int ntotal)
   nep::NeighborList result;
   result.n_pairs = 0;
 
-  double **x = atom->x;
-  int *type = atom->type;
   int inum = list->inum;
   int *ilist = list->ilist;
   int *numneigh = list->numneigh;
   int **firstneigh = list->firstneigh;
 
-  // First pass: count valid pairs
+  // Count total pairs directly from LAMMPS neighbor list
+  // No distance filtering needed - LAMMPS already uses our cutoff from init_one()
   int total_pairs = 0;
-  double cutoff_sq = cutoff_ * cutoff_;
-
   for (int ii = 0; ii < inum; ii++) {
-    int i = ilist[ii];
-    int *jlist = firstneigh[i];
-    int jnum = numneigh[i];
-
-    for (int jj = 0; jj < jnum; jj++) {
-      int j = jlist[jj];
-      j &= NEIGHMASK;
-
-      double dx = x[j][0] - x[i][0];
-      double dy = x[j][1] - x[i][1];
-      double dz = x[j][2] - x[i][2];
-      double rsq = dx * dx + dy * dy + dz * dz;
-
-      if (rsq <= cutoff_sq) {
-        total_pairs++;
-      }
-    }
+    total_pairs += numneigh[ilist[ii]];
   }
 
   if (total_pairs == 0) {
@@ -578,9 +559,8 @@ nep::NeighborList PairNEPSpin::build_neighbor_list_from_lammps(int ntotal)
 
   auto center_accessor = result.center_indices.accessor<int64_t, 1>();
   auto neighbor_accessor = result.neighbor_indices.accessor<int64_t, 1>();
-  auto shifts_accessor = result.shifts.accessor<float, 2>();
 
-  // Second pass: fill tensors
+  // Single pass: fill tensors directly from LAMMPS neighbor list
   int pair_idx = 0;
   for (int ii = 0; ii < inum; ii++) {
     int i = ilist[ii];
@@ -588,28 +568,15 @@ nep::NeighborList PairNEPSpin::build_neighbor_list_from_lammps(int ntotal)
     int jnum = numneigh[i];
 
     for (int jj = 0; jj < jnum; jj++) {
-      int j = jlist[jj];
-      j &= NEIGHMASK;
-
-      double dx = x[j][0] - x[i][0];
-      double dy = x[j][1] - x[i][1];
-      double dz = x[j][2] - x[i][2];
-      double rsq = dx * dx + dy * dy + dz * dz;
-
-      if (rsq <= cutoff_ * cutoff_) {
-        center_accessor[pair_idx] = i;
-        neighbor_accessor[pair_idx] = j;
-        // For LAMMPS ghost atoms, positions are already unwrapped
-        // So cell shifts are zero
-        shifts_accessor[pair_idx][0] = 0.0f;
-        shifts_accessor[pair_idx][1] = 0.0f;
-        shifts_accessor[pair_idx][2] = 0.0f;
-        pair_idx++;
-      }
+      int j = jlist[jj] & NEIGHMASK;
+      center_accessor[pair_idx] = i;
+      neighbor_accessor[pair_idx] = j;
+      pair_idx++;
     }
   }
 
   // Move tensors to target device
+  // Note: shifts are all zeros since LAMMPS ghost atoms have unwrapped positions
   result.center_indices = result.center_indices.to(device_);
   result.neighbor_indices = result.neighbor_indices.to(device_);
   result.shifts = result.shifts.to(device_);

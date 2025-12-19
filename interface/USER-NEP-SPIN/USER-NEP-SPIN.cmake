@@ -30,12 +30,26 @@ if(Torch_FOUND)
     endif()
   endforeach()
 
-  # Add sources
-  target_sources(lammps PRIVATE
+  # Base source files (non-Kokkos)
+  set(NEP_SPIN_SOURCES
     ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/pair_nep_spin.cpp
-    ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/nep_descriptor.cpp
-    ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/nep_math_utils.cpp
+    ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/descriptor.cpp
+    ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/math_utils.cpp
   )
+
+  # Add Kokkos source files if KOKKOS package is enabled
+  if(PKG_KOKKOS)
+    message(STATUS "USER-NEP-SPIN: Kokkos support enabled")
+    list(APPEND NEP_SPIN_SOURCES
+      ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/pair_nep_spin_kokkos.cpp
+    )
+    target_compile_definitions(lammps PRIVATE NEP_SPIN_KOKKOS)
+  else()
+    message(STATUS "USER-NEP-SPIN: Kokkos support disabled (enable with -DPKG_KOKKOS=ON)")
+  endif()
+
+  # Add sources to LAMMPS
+  target_sources(lammps PRIVATE ${NEP_SPIN_SOURCES})
 
   # Link LibTorch
   target_link_libraries(lammps PUBLIC ${TORCH_LIBRARIES})

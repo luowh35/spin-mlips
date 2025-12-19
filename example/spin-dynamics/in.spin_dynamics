@@ -1,0 +1,103 @@
+# LAMMPS input script for CrI3 spin dynamics
+# CrI3 Curie temperature: ~45K (monolayer), ~61K (bulk)
+
+units           metal
+atom_style      spin
+atom_modify     map array
+boundary        p p p
+newton          on
+
+# Read initial structure (use minimized structure)
+read_data       CrI3_fm_rlx.data
+
+# Define NEP-SPIN pair style
+pair_style      spin/nep
+pair_coeff      * * best_model.pt Cr I
+
+# Neighbor settings
+neighbor        0.5 bin
+neigh_modify    delay 0 every 1 check yes
+
+# Create group for magnetic atoms only (Cr)
+group           magnetic type 1
+
+# ============================================
+# Temperature settings
+# ============================================
+# Choose temperature (in Kelvin):
+# - 10 K: well below Tc, ordered phase
+# - 30 K: below Tc, some thermal fluctuations
+# - 50 K: near Tc (monolayer), critical fluctuations
+# - 100 K: above Tc, paramagnetic
+
+variable        temp equal 10.0
+variable        seed equal 12345
+
+# ============================================
+# Spin dynamics settings
+# ============================================
+# Timestep for spin dynamics (ps)
+# Typical: 0.0001 - 0.001 ps for spin dynamics
+timestep        0.0002
+
+# Gilbert damping parameter (dimensionless)
+# 0.0 = no damping (microcanonical)
+# 0.1 = moderate damping
+# 1.0 = overdamped
+variable        damping equal 0.1
+
+# ============================================
+# Fixes for spin dynamics
+# ============================================
+# Option 1: NVE spin dynamics (frozen lattice, spin microcanonical)
+# fix             1 all nve/spin lattice frozen
+
+# Option 2: Langevin spin dynamics (frozen lattice, spin canonical at temperature T)
+#fix             1 all langevin/spin ${temp} ${damping} ${seed}
+#fix             2 all nve/spin lattice frozen
+
+# Option 3: Full spin-lattice dynamics (both move)
+#fix             1 all langevin/spin ${temp} ${damping} ${seed}
+velocity all create 10 12345
+fix             2 all nve/spin lattice moving
+fix             3 all nvt temp ${temp} ${temp} 0.02
+#fix             1 all langevin/spin ${temp} ${damping} ${seed}
+# ============================================
+# Compute spin properties
+# ============================================
+compute         sp_prop all property/atom sp spx spy spz
+compute         mag_x magnetic reduce ave c_sp_prop[2]
+compute         mag_y magnetic reduce ave c_sp_prop[3]
+compute         mag_z magnetic reduce ave c_sp_prop[4]
+
+# Total spin magnitude
+variable        mag_total equal sqrt(c_mag_x^2+c_mag_y^2+c_mag_z^2)
+
+# ============================================
+# Output settings
+# ============================================
+thermo_style    custom step time temp pe ke etotal c_mag_x c_mag_y c_mag_z v_mag_total
+thermo          100
+
+# Dump trajectory for visualization
+dump            spin_dump magnetic custom 100 spin_dynamics.dump id type x y z c_sp_prop[1] c_sp_prop[2] c_sp_prop[3] c_sp_prop[4]
+
+# ============================================
+# Run spin dynamics
+# ============================================
+# Equilibration (optional)
+print "Starting equilibration..."
+run             100000
+
+# Production run
+#print "Starting production run..."
+#reset_timestep  0
+#run             100000
+
+# Save final state
+write_data      spin_dynamics_final.data
+
+print "===== Spin Dynamics Completed ====="
+print "Temperature: ${temp} K"
+print "Final magnetization: ($(c_mag_x), $(c_mag_y), $(c_mag_z))"
+print "Total |M|: $(v_mag_total)"

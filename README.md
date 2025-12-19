@@ -64,7 +64,7 @@
   tar -xzf eigen-3.4.0.tar.gz
   # Then set: export EIGEN3_PATH=$(pwd)/eigen-3.4.0
   ```
-
+### Build LAMMPS using `make` 
 * step 1: Copy the files in `src/` into `interface/USER-NEP-SPIN/` such that you have the following files in `interface/USER-NEP-SPIN/`:
   ```shell
   make interface #copy the files into the interface/USER-NEP-SPIN/
@@ -102,6 +102,60 @@
   make mpi -j4
   ```
 
+### Building LAMMPS Using `cmake` (prefered)
+
+If you need to add GPU support, it is recommended to compile the Kokko package using CMake.
+For the Kokko library, you need to download the CUDA version of the libtorch library.
+
+```bash
+# CUDA 12.1 version
+wget https://download.pytorch.org/libtorch/cu121/libtorch-cxx11-abi-shared-with-deps-2.1.2%2Bcu121.zip
+unzip libtorch-cxx11-abi-shared-with-deps-2.1.2+cu121.zip
+```
+
+* step 1: Copy the files in `src/` into `interface/USER-NEP-SPIN/` such that you have the following files in `interface/USER-NEP-SPIN/`:
+  ```shell
+  make interface #copy the files into the interface/USER-NEP-SPIN/
+  make clean-interface #remove the files
+  cp interface/USER-NEP-SPIN/ your/lammps/src/ -rf
+  ```
+* step 2: building lammps using cmake:
+
+```bash
+# ====== Modify these paths and GPU architecture ======
+LAMMPS_DIR=/path/to/lammps
+LIBTORCH_PATH=/path/to/libtorch
+# GPU Arch: V100=VOLTA70, A100=AMPERE80, RTX3090=AMPERE86, RTX4090=ADA89, H100=HOPPER90
+GPU_ARCH=AMPERE80
+# =====================================================
+
+cd ${LAMMPS_DIR}
+mkdir -p build_kokkos && cd build_kokkos
+
+cmake ../cmake \
+    -DCMAKE_PREFIX_PATH=${LIBTORCH_PATH} \
+    -DCMAKE_CXX_FLAGS="-I${LIBTORCH_PATH}/include -I${LIBTORCH_PATH}/include/torch/csrc/api/include -D_GLIBCXX_USE_CXX11_ABI=1" \
+    -DPKG_SPIN=ON \
+    -DPKG_USER-NEP-SPIN=ON \
+    -DPKG_KOKKOS=ON \
+    -DKokkos_ENABLE_CUDA=ON \
+    -DKokkos_ARCH_${GPU_ARCH}=ON \
+    -DCMAKE_CXX_COMPILER=${LAMMPS_DIR}/lib/kokkos/bin/nvcc_wrapper \
+    -DPKG_MOLECULE=ON \
+    -DPKG_KSPACE=ON \
+    -DPKG_MANYBODY=ON \
+    -DBUILD_MPI=ON \
+    -DBUILD_OMP=ON \
+    -DCMAKE_CXX_STANDARD=17 \
+    -DCMAKE_BUILD_TYPE=Release
+
+make -j$(nproc)
+
+# Verify
+./lmp -h | grep spin/nep
+```
+
+
 ## Use the NEP-LAMMPS interface
 
 * `atom_style` can only be `spin`
@@ -111,6 +165,15 @@
   pair_style spin/nep   # YOUR_NEP_MODEL_FILE.txt is your NEP model file (with path)
   pair_coeff * * YOUR_NEP_MODEL_FILE.pt Cr I                        # This format is fixed
   ```
+When using Kokkos version, specify GPU devices:
+
+```bash
+# Single GPU
+mpirun -np 1 ./lmp -k on g 1 -sf kk -i input.in
+
+# Multiple GPUs (one GPU per MPI process)
+mpirun -np 4 ./lmp -k on g 4 -sf kk -i input.in
+```
   
 
 # Citation
