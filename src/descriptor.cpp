@@ -42,24 +42,20 @@ MagneticACEDescriptor::MagneticACEDescriptor(const DescriptorConfig& config)
 }
 
 void MagneticACEDescriptor::init_angular_dimensions() {
-    // Initialize angular dimensions for A (l_phi_max)
+    // Initialize angular splits for A (l_phi_max)
     int idx = 0;
     angular_splits_A_.clear();
     for (int l = 0; l <= l_phi_max_; ++l) {
-        for (int m = -l; m <= l; ++m) {
-            angular_dims_A_[{l, m}] = idx++;
-        }
+        idx += 2*l + 1;
         angular_splits_A_.push_back(2*l + 1);
     }
     n_angular_total_A_ = idx;
 
-    // Initialize angular dimensions for M (l_max)
+    // Initialize angular splits for M (l_max)
     idx = 0;
     angular_splits_M_.clear();
     for (int l = 0; l <= l_max_; ++l) {
-        for (int m = -l; m <= l; ++m) {
-            angular_dims_M_[{l, m}] = idx++;
-        }
+        idx += 2*l + 1;
         angular_splits_M_.push_back(2*l + 1);
     }
     n_angular_total_M_ = idx;

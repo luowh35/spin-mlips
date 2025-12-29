@@ -9,23 +9,6 @@
 
 namespace nep {
 
-// Atomic system data structure
-struct AtomicSystem {
-    torch::Tensor positions;      // [N, 3] Atomic positions
-    torch::Tensor numbers;        // [N] Atomic numbers
-    torch::Tensor magmoms;        // [N, 3] Magnetic moments (3D vectors)
-    torch::Tensor cell;           // [3, 3] Cell matrix
-    torch::Tensor pbc;            // [3] Periodic boundary conditions
-    int n_atoms;                  // Number of atoms
-    std::vector<std::string> elements;  // Element symbol list
-
-    // Optional reference data (for validation)
-    torch::Tensor ref_energy;     // Scalar
-    torch::Tensor ref_forces;     // [N, 3] Reference forces
-    torch::Tensor ref_magforces;  // [N, 3] Reference magnetic forces
-    bool has_ref_data = false;
-};
-
 // Neighbor list data structure
 struct NeighborList {
     torch::Tensor center_indices;    // [M] Central atom indices
@@ -63,20 +46,6 @@ struct CGTerm {
         : m1(m1_), m2(m2_), m3(m3_), coeff(c) {}
 };
 
-// Prediction result
-struct PredictionResult {
-    float total_energy;           // Total energy
-    torch::Tensor atomic_energies; // [N] Atomic energies
-    torch::Tensor forces;          // [N, 3] Forces on atoms
-    torch::Tensor mag_forces;      // [N, 3] Magnetic forces
-
-    // Computation time (milliseconds)
-    double descriptor_time_ms = 0.0;
-    double inference_time_ms = 0.0;
-    double gradient_time_ms = 0.0;
-    double total_time_ms = 0.0;
-};
-
 // Utility function: convert element symbol to atomic number
 inline int element_to_number(const std::string& element) {
     static const std::map<std::string, int> element_map = {
@@ -99,23 +68,6 @@ inline int element_to_number(const std::string& element) {
         return it->second;
     }
     throw std::runtime_error("Unknown element: " + element);
-}
-
-// Utility function: convert atomic number to element symbol
-inline std::string number_to_element(int number) {
-    static const std::vector<std::string> elements = {
-        "", "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne",
-        "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca",
-        "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
-        "Ga", "Ge", "As", "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr",
-        "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In", "Sn",
-        "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd"
-    };
-
-    if (number > 0 && number < static_cast<int>(elements.size())) {
-        return elements[number];
-    }
-    return "Unknown";
 }
 
 } // namespace nep

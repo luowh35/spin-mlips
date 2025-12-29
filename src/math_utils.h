@@ -70,6 +70,20 @@ public:
         bool keepdim,
         float epsilon
     );
+
+    /**
+     * Project forces perpendicular to magnetic moments
+     * F_perp = F - (F · n) * n, where n is the unit vector of magmoms
+     * @param forces Input forces tensor [N, 3]
+     * @param magmoms Magnetic moments tensor [N, 3]
+     * @param epsilon Small value to prevent division by zero
+     * @return Projected forces tensor [N, 3]
+     */
+    static torch::Tensor project_forces_perpendicular(
+        const torch::Tensor& forces,
+        const torch::Tensor& magmoms,
+        float epsilon = 1e-12f
+    );
 };
 
 } // namespace nep

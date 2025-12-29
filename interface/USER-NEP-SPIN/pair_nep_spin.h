@@ -26,15 +26,14 @@ PairStyle(spin/nep, PairNEPSpin)
 #define LMP_PAIR_NEP_SPIN_H
 
 #include "pair_spin.h"
-#include "nep_types.h"
-#include "descriptor.h"
-#include <torch/script.h>
-#include <torch/torch.h>
 #include <string>
 #include <vector>
 #include <memory>
 
 namespace LAMMPS_NS {
+
+// Forward declaration - implementation hidden in cpp file
+struct PairNEPSpinImpl;
 
 class PairNEPSpin : public PairSpin {
  public:
@@ -53,19 +52,14 @@ class PairNEPSpin : public PairSpin {
   void compute_single_pair(int, double *) override;
 
  protected:
-  // TorchScript model
-  torch::jit::Module model_;
-  torch::Device device_;
-  bool model_loaded_;
+  // pimpl to hide torch dependencies
+  std::unique_ptr<PairNEPSpinImpl> impl_;
 
-  // Model parameters
+  // Model parameters (non-torch types only in header)
   double cutoff_;              // Position cutoff (rc)
   double m_cut_;               // Magnetic moment cutoff
   std::string model_path_;
-
-  // Descriptor configuration
-  nep::DescriptorConfig descriptor_config_;
-  std::unique_ptr<nep::MagneticACEDescriptor> descriptor_;
+  bool model_loaded_;
 
   // Element mapping
   std::vector<std::string> elements_;
@@ -74,39 +68,13 @@ class PairNEPSpin : public PairSpin {
   // Per-type magnetic moment magnitude (muB)
   double *sp_magnitude_;
 
-  // Cached tensors for compute
-  torch::Tensor positions_tensor_;
-  torch::Tensor numbers_tensor_;
-  torch::Tensor magmoms_tensor_;
-  torch::Tensor cell_tensor_;
-
-  // Cached magnetic forces for compute_single_pair
-  torch::Tensor cached_mag_forces_;
+  // Force caching for compute_single_pair
   bool forces_cached_;
-
-  // Spin state tracking for detecting when recomputation is needed
-  std::vector<double> cached_spins_;  // Cached spin state [nlocal*4]
-  bool spins_changed();               // Check if spins have changed since last compute
-  void cache_current_spins();         // Store current spin state
-  void recompute_forces();            // Recompute forces with current spin configuration
 
   // Internal methods
   void allocate() override;
   void load_model(const std::string &path);
-  void read_config_from_model();
-
-  // Data conversion methods
-  torch::Tensor convert_positions(int ntotal);
-  torch::Tensor convert_types(int ntotal);
-  torch::Tensor convert_spins_to_magmoms(int ntotal);
-  torch::Tensor get_cell_tensor();
-
-  // Neighbor list conversion
-  nep::NeighborList build_neighbor_list_from_lammps(int ntotal);
-
-  // Force distribution
-  void distribute_forces(const torch::Tensor &forces, int nlocal, int nghost);
-  void distribute_magnetic_forces(const torch::Tensor &mag_forces, int nlocal);
+  void recompute_forces();
 };
 
 }    // namespace LAMMPS_NS

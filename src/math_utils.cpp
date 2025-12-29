@@ -212,4 +212,34 @@ MathUtils::spherical_harmonics(
     return Y_lm;
 }
 
+// =============================================================================
+// Project Forces Perpendicular to Magnetic Moments
+// =============================================================================
+
+torch::Tensor MathUtils::project_forces_perpendicular(
+    const torch::Tensor& forces,
+    const torch::Tensor& magmoms,
+    float epsilon
+) {
+    // Compute magnetic moment norms: [N, 1]
+    auto m_norms = torch::norm(magmoms, 2, /*dim=*/-1, /*keepdim=*/true);
+
+    // Safe normalization (prevent division by zero)
+    auto m_norms_safe = m_norms.clamp_min(epsilon);
+
+    // Unit vectors: [N, 3]
+    auto m_unit = magmoms / m_norms_safe;
+
+    // Dot product: F · n, [N, 1]
+    auto dot_product = (forces * m_unit).sum(/*dim=*/-1, /*keepdim=*/true);
+
+    // Parallel component: (F · n) * n
+    auto f_parallel = dot_product * m_unit;
+
+    // Perpendicular component: F - (F · n) * n
+    auto f_perp = forces - f_parallel;
+
+    return f_perp;
+}
+
 } // namespace nep

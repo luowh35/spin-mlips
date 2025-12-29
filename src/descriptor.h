@@ -57,7 +57,6 @@ private:
     int n_channels_j_, n_channels_i_, n_channels_spin_;
     int n_angular_total_A_, n_angular_total_M_;
     int descriptor_dimension_;
-    std::map<std::pair<int, int>, int> angular_dims_A_, angular_dims_M_;
     std::vector<int> angular_splits_A_, angular_splits_M_;
 
     // Initialization functions
