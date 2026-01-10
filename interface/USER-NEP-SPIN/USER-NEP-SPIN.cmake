@@ -33,6 +33,8 @@ if(Torch_FOUND)
   # Base source files (non-Kokkos)
   set(NEP_SPIN_SOURCES
     ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/pair_nep_spin.cpp
+    ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/fix_nve_spin_nep.cpp
+    ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/fix_langevin_spin_nep.cpp
     ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/descriptor.cpp
     ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/math_utils.cpp
   )

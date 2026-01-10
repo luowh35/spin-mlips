@@ -17,16 +17,21 @@
 ------------------------------------------------------------------------- */
 
 #include "pair_nep_spin.h"
+#include "nep_spin_data.h"
 #include "atom.h"
 #include "comm.h"
 #include "domain.h"
 #include "error.h"
 #include "force.h"
 #include "memory.h"
+#include "modify.h"
 #include "neigh_list.h"
 #include "neigh_request.h"
 #include "neighbor.h"
 #include "update.h"
+#include "fix_nve_spin.h"
+#include "fix_nve_spin_nep.h"
+#include "fix_nve_spin_sib.h"
 
 // Torch headers - only in cpp file
 #include <torch/script.h>
@@ -494,7 +499,35 @@ void PairNEPSpin::init_style()
     error->all(FLERR, "Failed to initialize NEP descriptor: {}", e.what());
   }
 
-  PairSpin::init_style();
+  // Check for compatible spin integration fix
+  // Support standard nve/spin, midpoint nve/spin/nep, and SIB nve/spin/sib
+  auto nve_spin_fixes = modify->get_fix_by_style("^nve/spin$");
+  auto nve_spin_nep_fixes = modify->get_fix_by_style("^nve/spin/nep$");
+  auto nve_spin_sib_fixes = modify->get_fix_by_style("^nve/spin/sib$");
+  auto neb_spin_fixes = modify->get_fix_by_style("^neb/spin$");
+
+  int total_spin_fixes = nve_spin_fixes.size() + nve_spin_nep_fixes.size() +
+                         nve_spin_sib_fixes.size() + neb_spin_fixes.size();
+
+  if ((comm->me == 0) && (total_spin_fixes == 0))
+    error->warning(FLERR, "Using spin pair style without nve/spin, nve/spin/nep, nve/spin/sib, or neb/spin");
+
+  // Get lattice_flag from the appropriate fix
+  if (nve_spin_nep_fixes.size() == 1) {
+    // Using our midpoint method
+    lattice_flag = (dynamic_cast<FixNVESpinNEP *>(nve_spin_nep_fixes.front()))->lattice_flag;
+  } else if (nve_spin_sib_fixes.size() == 1) {
+    // Using SIB method
+    lattice_flag = (dynamic_cast<FixNVESpinSIB *>(nve_spin_sib_fixes.front()))->lattice_flag;
+  } else if (nve_spin_fixes.size() == 1) {
+    // Using standard Suzuki-Trotter method
+    lattice_flag = (dynamic_cast<FixNVESpin *>(nve_spin_fixes.front()))->lattice_flag;
+  } else if (total_spin_fixes > 1) {
+    error->warning(FLERR, "Using multiple instances of spin integration fixes");
+  }
+
+  // Initialize size of energy stacking lists (from PairSpin)
+  nlocal_max = atom->nlocal;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -924,5 +957,34 @@ void PairNEPSpin::recompute_forces()
   } catch (const std::exception &e) {
     error->warning(FLERR, "Error in NEP-SPIN recompute_forces: {}", e.what());
     forces_cached_ = false;
+  }
+}
+
+/* ----------------------------------------------------------------------
+   Distribute cached magnetic forces to fm array
+   Called by fix_nve_spin_sib after recompute_forces()
+------------------------------------------------------------------------- */
+
+void PairNEPSpin::distribute_cached_mag_forces()
+{
+  if (!forces_cached_) {
+    return;
+  }
+
+  double **sp = atom->sp;
+  double **fm = atom->fm;
+  int nlocal = atom->nlocal;
+
+  auto mag_accessor = impl_->cached_mag_forces.accessor<float, 2>();
+
+  // Apply cached magnetic forces to fm array
+  for (int i = 0; i < nlocal; i++) {
+    double mag = sp[i][3];
+    if (mag > 1e-10) {
+      // fm += mag * cached_mag_forces / hbar
+      fm[i][0] += mag * static_cast<double>(mag_accessor[i][0]) / hbar;
+      fm[i][1] += mag * static_cast<double>(mag_accessor[i][1]) / hbar;
+      fm[i][2] += mag * static_cast<double>(mag_accessor[i][2]) / hbar;
+    }
   }
 }

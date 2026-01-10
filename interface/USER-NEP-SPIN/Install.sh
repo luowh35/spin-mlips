@@ -9,6 +9,10 @@ if (test $1 = 1) then
   # Base files (always installed)
   cp pair_nep_spin.cpp ..
   cp pair_nep_spin.h ..
+  cp fix_nve_spin_sib.cpp ..
+  cp fix_nve_spin_sib.h ..
+  cp fix_langevin_spin_sib.cpp ..
+  cp fix_langevin_spin_sib.h ..
   cp descriptor.cpp ..
   cp descriptor.h ..
   cp math_utils.cpp ..
@@ -29,6 +33,10 @@ elif (test $1 = 0) then
   # Base files
   rm -f ../pair_nep_spin.cpp
   rm -f ../pair_nep_spin.h
+  rm -f ../fix_nve_spin_sib.cpp
+  rm -f ../fix_nve_spin_sib.h
+  rm -f ../fix_langevin_spin_sib.cpp
+  rm -f ../fix_langevin_spin_sib.h
   rm -f ../descriptor.cpp
   rm -f ../descriptor.h
   rm -f ../math_utils.cpp

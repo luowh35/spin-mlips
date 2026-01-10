@@ -51,6 +51,12 @@ class PairNEPSpin : public PairSpin {
   // PairSpin interface for spin dynamics
   void compute_single_pair(int, double *) override;
 
+  // For SIB method: get cached magnetic forces and distribute to fm array
+  void distribute_cached_mag_forces();
+
+  // Recompute magnetic forces only (without atomic forces)
+  void recompute_forces();
+
  protected:
   // pimpl to hide torch dependencies
   std::unique_ptr<PairNEPSpinImpl> impl_;
@@ -74,7 +80,6 @@ class PairNEPSpin : public PairSpin {
   // Internal methods
   void allocate() override;
   void load_model(const std::string &path);
-  void recompute_forces();
 };
 
 }    // namespace LAMMPS_NS
