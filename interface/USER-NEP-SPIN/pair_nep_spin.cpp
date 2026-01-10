@@ -30,7 +30,6 @@
 #include "neighbor.h"
 #include "update.h"
 #include "fix_nve_spin.h"
-#include "fix_nve_spin_nep.h"
 #include "fix_nve_spin_sib.h"
 
 // Torch headers - only in cpp file
@@ -500,23 +499,19 @@ void PairNEPSpin::init_style()
   }
 
   // Check for compatible spin integration fix
-  // Support standard nve/spin, midpoint nve/spin/nep, and SIB nve/spin/sib
+  // Support standard nve/spin and SIB nve/spin/sib
   auto nve_spin_fixes = modify->get_fix_by_style("^nve/spin$");
-  auto nve_spin_nep_fixes = modify->get_fix_by_style("^nve/spin/nep$");
   auto nve_spin_sib_fixes = modify->get_fix_by_style("^nve/spin/sib$");
   auto neb_spin_fixes = modify->get_fix_by_style("^neb/spin$");
 
-  int total_spin_fixes = nve_spin_fixes.size() + nve_spin_nep_fixes.size() +
-                         nve_spin_sib_fixes.size() + neb_spin_fixes.size();
+  int total_spin_fixes =
+      nve_spin_fixes.size() + nve_spin_sib_fixes.size() + neb_spin_fixes.size();
 
   if ((comm->me == 0) && (total_spin_fixes == 0))
-    error->warning(FLERR, "Using spin pair style without nve/spin, nve/spin/nep, nve/spin/sib, or neb/spin");
+    error->warning(FLERR, "Using spin pair style without nve/spin, nve/spin/sib, or neb/spin");
 
   // Get lattice_flag from the appropriate fix
-  if (nve_spin_nep_fixes.size() == 1) {
-    // Using our midpoint method
-    lattice_flag = (dynamic_cast<FixNVESpinNEP *>(nve_spin_nep_fixes.front()))->lattice_flag;
-  } else if (nve_spin_sib_fixes.size() == 1) {
+  if (nve_spin_sib_fixes.size() == 1) {
     // Using SIB method
     lattice_flag = (dynamic_cast<FixNVESpinSIB *>(nve_spin_sib_fixes.front()))->lattice_flag;
   } else if (nve_spin_fixes.size() == 1) {
