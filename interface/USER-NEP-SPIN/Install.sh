@@ -18,6 +18,8 @@ if (test $1 = 1) then
   cp math_utils.cpp ..
   cp math_utils.h ..
   cp nep_types.h ..
+  cp nep_spin_data.cpp ..
+  cp nep_spin_data.h ..
   cp cg_coefficients.h ..
 
   # Kokkos files - check if KOKKOS package is installed
@@ -42,6 +44,8 @@ elif (test $1 = 0) then
   rm -f ../math_utils.cpp
   rm -f ../math_utils.h
   rm -f ../nep_types.h
+  rm -f ../nep_spin_data.cpp
+  rm -f ../nep_spin_data.h
   rm -f ../cg_coefficients.h
 
   # Kokkos files
