@@ -11,15 +11,17 @@ if (test $1 = 1) then
   cp pair_nep_spin.h ..
   cp fix_nve_spin_sib.cpp ..
   cp fix_nve_spin_sib.h ..
+  cp fix_nve_spin_rk4.cpp ..
+  cp fix_nve_spin_rk4.h ..
   cp fix_langevin_spin_sib.cpp ..
   cp fix_langevin_spin_sib.h ..
+  cp fix_langevin_spin_rk4.cpp ..
+  cp fix_langevin_spin_rk4.h ..
   cp descriptor.cpp ..
   cp descriptor.h ..
   cp math_utils.cpp ..
   cp math_utils.h ..
   cp nep_types.h ..
-  cp nep_spin_data.cpp ..
-  cp nep_spin_data.h ..
   cp cg_coefficients.h ..
 
   # Kokkos files - check if KOKKOS package is installed
@@ -37,15 +39,17 @@ elif (test $1 = 0) then
   rm -f ../pair_nep_spin.h
   rm -f ../fix_nve_spin_sib.cpp
   rm -f ../fix_nve_spin_sib.h
+  rm -f ../fix_nve_spin_rk4.cpp
+  rm -f ../fix_nve_spin_rk4.h
   rm -f ../fix_langevin_spin_sib.cpp
   rm -f ../fix_langevin_spin_sib.h
+  rm -f ../fix_langevin_spin_rk4.cpp
+  rm -f ../fix_langevin_spin_rk4.h
   rm -f ../descriptor.cpp
   rm -f ../descriptor.h
   rm -f ../math_utils.cpp
   rm -f ../math_utils.h
   rm -f ../nep_types.h
-  rm -f ../nep_spin_data.cpp
-  rm -f ../nep_spin_data.h
   rm -f ../cg_coefficients.h
 
   # Kokkos files

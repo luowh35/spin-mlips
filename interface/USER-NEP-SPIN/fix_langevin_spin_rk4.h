@@ -12,47 +12,39 @@
 ------------------------------------------------------------------------- */
 
 /* ----------------------------------------------------------------------
-   Langevin thermostat for NEP-SPIN SIB method
+   Langevin thermostat for NEP-SPIN RK4 method
 
-   This fix is designed to work with fix nve/spin/sib which uses the full
-   SIB predictor-corrector method (2 NN calls per timestep).
+   This fix is designed to work with fix nve/spin/rk4 which uses an RK4
+   half-step for spins (dt/2) and applies the same noise to all k1-k4
+   stages for the Stratonovich interpretation.
 
-   Key features for SIB:
+   Key features for RK4:
    1. compute_single_langevin_store_noise(): generates and stores noise
    2. compute_single_langevin_reuse_noise(): reuses stored noise
 
-   The same noise must be used in both predictor and corrector steps
-   for correct Stratonovich interpretation.
-
    Usage:
-     fix ID group langevin/spin/sib temp damp seed
-
-   Reference:
-   J.H. Mentink, M.V. Tretyakov, A. Fasolino, M.I. Katsnelson, T. Rasing,
-   "Stable and fast semi-implicit integration of the stochastic
-   Landau-Lifshitz equation", J. Phys.: Condens. Matter 22, 176001 (2010)
-   DOI: 10.1088/0953-8984/22/17/176001
+     fix ID group langevin/spin/rk4 temp damp seed
 ------------------------------------------------------------------------- */
 
 #ifdef FIX_CLASS
 // clang-format off
-FixStyle(langevin/spin/sib,FixLangevinSpinSIB);
+FixStyle(langevin/spin/rk4,FixLangevinSpinRK4);
 // clang-format on
 #else
 
-#ifndef LMP_FIX_LANGEVIN_SPIN_SIB_H
-#define LMP_FIX_LANGEVIN_SPIN_SIB_H
+#ifndef LMP_FIX_LANGEVIN_SPIN_RK4_H
+#define LMP_FIX_LANGEVIN_SPIN_RK4_H
 
 #include "fix.h"
 
 namespace LAMMPS_NS {
 
-class FixLangevinSpinSIB : public Fix {
+class FixLangevinSpinRK4 : public Fix {
  public:
   int tdamp_flag, temp_flag;    // damping and temperature flags
 
-  FixLangevinSpinSIB(class LAMMPS *, int, char **);
-  ~FixLangevinSpinSIB() override;
+  FixLangevinSpinRK4(class LAMMPS *, int, char **);
+  ~FixLangevinSpinRK4() override;
   int setmask() override;
   void init() override;
   void setup(int) override;
@@ -60,15 +52,15 @@ class FixLangevinSpinSIB : public Fix {
   // Standard Langevin computation (for compatibility)
   void compute_single_langevin(int, double *, double *);
 
-  // SIB-specific: generate noise and store it
+  // RK4-specific: generate noise and store it
   void compute_single_langevin_store_noise(int, double *, double *, double *);
 
-  // SIB-specific: reuse stored noise (for corrector step)
+  // RK4-specific: reuse stored noise (for k2-k4 stages)
   void compute_single_langevin_reuse_noise(int, double *, double *, double *);
 
  protected:
   double alpha_t;       // transverse mag. damping
-  double dts;           // magnetic timestep (dt for SIB method)
+  double dts;           // magnetic timestep (dt/2 for RK4 half-step)
   double temp;          // spin bath temperature
   double D, sigma;      // bath intensity var.
   double gil_factor;    // gilbert's prefactor

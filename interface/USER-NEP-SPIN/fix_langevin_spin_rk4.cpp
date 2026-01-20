@@ -13,26 +13,19 @@
 ------------------------------------------------------------------------- */
 
 /* ----------------------------------------------------------------------
-   Langevin thermostat for NEP-SPIN SIB method
+   Langevin thermostat for NEP-SPIN RK4 method
 
    Key features:
-   - Uses dts = dt (full timestep) for noise scaling
-   - Provides two methods for SIB predictor-corrector:
+   - Uses dts = dt/2 for RK4 half-step scaling
+   - Provides two methods for RK4 stages:
      1. compute_single_langevin_store_noise: generates and stores noise
      2. compute_single_langevin_reuse_noise: reuses stored noise
 
-   The stochastic LLG equation in the SIB method requires the same noise
-   to be used in both predictor and corrector steps for correct
-   Stratonovich interpretation.
-
-   Reference:
-   J.H. Mentink, M.V. Tretyakov, A. Fasolino, M.I. Katsnelson, T. Rasing,
-   "Stable and fast semi-implicit integration of the stochastic
-   Landau-Lifshitz equation", J. Phys.: Condens. Matter 22, 176001 (2010)
-   DOI: 10.1088/0953-8984/22/17/176001
+   The stochastic LLG equation in the RK4 method requires the same noise
+   to be used for all k1-k4 stages for correct Stratonovich interpretation.
 ------------------------------------------------------------------------- */
 
-#include "fix_langevin_spin_sib.h"
+#include "fix_langevin_spin_rk4.h"
 
 #include "atom.h"
 #include "comm.h"
@@ -52,10 +45,10 @@ using namespace MathConst;
 
 /* ---------------------------------------------------------------------- */
 
-FixLangevinSpinSIB::FixLangevinSpinSIB(LAMMPS *lmp, int narg, char **arg) :
+FixLangevinSpinRK4::FixLangevinSpinRK4(LAMMPS *lmp, int narg, char **arg) :
   Fix(lmp, narg, arg), random(nullptr)
 {
-  if (narg < 6) error->all(FLERR, "Illegal fix langevin/spin/sib command");
+  if (narg < 6) error->all(FLERR, "Illegal fix langevin/spin/rk4 command");
 
   temp = utils::numeric(FLERR, arg[3], false, lmp);
   alpha_t = utils::numeric(FLERR, arg[4], false, lmp);
@@ -63,11 +56,11 @@ FixLangevinSpinSIB::FixLangevinSpinSIB(LAMMPS *lmp, int narg, char **arg) :
 
   // Check validity
   if (alpha_t < 0.0)
-    error->all(FLERR, "Fix langevin/spin/sib damping must be >= 0");
+    error->all(FLERR, "Fix langevin/spin/rk4 damping must be >= 0");
   if (temp < 0.0)
-    error->all(FLERR, "Fix langevin/spin/sib temperature must be >= 0");
+    error->all(FLERR, "Fix langevin/spin/rk4 temperature must be >= 0");
   if (seed <= 0)
-    error->all(FLERR, "Illegal fix langevin/spin/sib seed");
+    error->all(FLERR, "Illegal fix langevin/spin/rk4 seed");
 
   // Set flags
   tdamp_flag = 0;
@@ -81,14 +74,14 @@ FixLangevinSpinSIB::FixLangevinSpinSIB(LAMMPS *lmp, int narg, char **arg) :
 
 /* ---------------------------------------------------------------------- */
 
-FixLangevinSpinSIB::~FixLangevinSpinSIB()
+FixLangevinSpinRK4::~FixLangevinSpinRK4()
 {
   delete random;
 }
 
 /* ---------------------------------------------------------------------- */
 
-int FixLangevinSpinSIB::setmask()
+int FixLangevinSpinRK4::setmask()
 {
   int mask = 0;
   return mask;
@@ -96,12 +89,12 @@ int FixLangevinSpinSIB::setmask()
 
 /* ---------------------------------------------------------------------- */
 
-void FixLangevinSpinSIB::init()
+void FixLangevinSpinRK4::init()
 {
-  // Check if fix nve/spin/sib is defined
-  auto sib_fixes = modify->get_fix_by_style("^nve/spin/sib$");
-  if (sib_fixes.empty())
-    error->warning(FLERR, "Fix langevin/spin/sib should be used with fix nve/spin/sib");
+  // Check if fix nve/spin/rk4 is defined
+  auto rk4_fixes = modify->get_fix_by_style("^nve/spin/rk4$");
+  if (rk4_fixes.empty())
+    error->warning(FLERR, "Fix langevin/spin/rk4 should be used with fix nve/spin/rk4");
 
   // Verify this fix comes after force fixes
   int flag_force = 0;
@@ -109,57 +102,50 @@ void FixLangevinSpinSIB::init()
   for (int i = 0; i < modify->nfix; i++) {
     if (utils::strmatch(modify->fix[i]->style, "^precession/spin"))
       flag_force = i;
-    if (strcmp(modify->fix[i]->style, "langevin/spin/sib") == 0)
+    if (strcmp(modify->fix[i]->style, "langevin/spin/rk4") == 0)
       flag_lang = i;
   }
 
   if (flag_force >= flag_lang)
-    error->all(FLERR, "Fix langevin/spin/sib has to come after all other spin fixes");
+    error->all(FLERR, "Fix langevin/spin/rk4 has to come after all other spin fixes");
 
   // Gilbert factor
   gil_factor = 1.0 / (1.0 + alpha_t * alpha_t);
 
-  // Use dt/2 for SIB method - each half-step applies noise once
-  // Total variance per timestep: 2 * (sigma * dts)^2 matches original 4 * (sigma_orig * dts_orig)^2
+  // Use dt/2 for RK4 half-steps (noise generated once per half-step)
   dts = 0.5 * update->dt;
 
   // Calculate noise strength
-  // From Mentink et al. (2010), Eq. (6):
   // D = alpha * k_B * T / (mu_s * hbar)
   // sigma = sqrt(2 * D)
   double hbar = force->hplanck / MY_2PI;  // eV/(rad.THz)
   double kb = force->boltz;               // eV/K
 
-  // Note: The factor (1 + alpha^2) comes from the transformation to
-  // the effective field representation.
-  // Note: We do NOT include 1/mu_s here because pair_nep_spin already
-  // includes mu_s in fm (fm = mu_s * dE/dM / hbar). This is consistent
-  // with the original fix_langevin_spin implementation.
+  // We do NOT include 1/mu_s here because pair_nep_spin already
+  // includes mu_s in fm (fm = mu_s * dE/dM / hbar).
   D = (alpha_t * (1.0 + alpha_t * alpha_t) * kb * temp);
   D /= (hbar * dts);
   sigma = sqrt(2.0 * D);
 
   if (comm->me == 0) {
-    utils::logmesg(lmp, "Fix langevin/spin/sib: Using dts = dt/2 = {} for SIB half-step\n", dts);
-    utils::logmesg(lmp, "Fix langevin/spin/sib: sigma = {}, D = {}\n", sigma, D);
-    utils::logmesg(lmp, "Fix langevin/spin/sib: Same noise used in predictor and corrector of each half-step\n");
+    utils::logmesg(lmp, "Fix langevin/spin/rk4: Using dts = dt/2 = {} for RK4 half-step\n", dts);
+    utils::logmesg(lmp, "Fix langevin/spin/rk4: sigma = {}, D = {}\n", sigma, D);
+    utils::logmesg(lmp, "Fix langevin/spin/rk4: Same noise used for k1-k4 in each half-step\n");
   }
 }
 
 /* ---------------------------------------------------------------------- */
 
-void FixLangevinSpinSIB::setup(int vflag)
+void FixLangevinSpinRK4::setup(int vflag)
 {
   // Nothing to do
 }
 
 /* ---------------------------------------------------------------------- */
 
-void FixLangevinSpinSIB::add_tdamping(double spi[3], double fmi[3])
+void FixLangevinSpinRK4::add_tdamping(double spi[3], double fmi[3])
 {
   // Transverse damping: fmi -= alpha * (fmi × spi)
-  // This corresponds to the Gilbert damping term in LLG equation
-  // Note: This should be called AFTER stochastic noise is added so random damping is included
   double cpx = fmi[1] * spi[2] - fmi[2] * spi[1];
   double cpy = fmi[2] * spi[0] - fmi[0] * spi[2];
   double cpz = fmi[0] * spi[1] - fmi[1] * spi[0];
@@ -171,10 +157,9 @@ void FixLangevinSpinSIB::add_tdamping(double spi[3], double fmi[3])
 
 /* ---------------------------------------------------------------------- */
 
-void FixLangevinSpinSIB::add_noise(double fmi[3], double noise[3])
+void FixLangevinSpinRK4::add_noise(double fmi[3], double noise[3])
 {
   // Add stochastic field to effective field
-  // This should be called BEFORE damping is applied
   fmi[0] += sigma * noise[0];
   fmi[1] += sigma * noise[1];
   fmi[2] += sigma * noise[2];
@@ -182,10 +167,9 @@ void FixLangevinSpinSIB::add_noise(double fmi[3], double noise[3])
 
 /* ---------------------------------------------------------------------- */
 
-void FixLangevinSpinSIB::apply_gil_factor(double fmi[3])
+void FixLangevinSpinRK4::apply_gil_factor(double fmi[3])
 {
   // Apply Gilbert factor: fmi *= 1/(1+alpha^2)
-  // This should be called AFTER both noise and damping are applied
   fmi[0] *= gil_factor;
   fmi[1] *= gil_factor;
   fmi[2] *= gil_factor;
@@ -197,15 +181,14 @@ void FixLangevinSpinSIB::apply_gil_factor(double fmi[3])
 
    Order follows original LAMMPS fix_langevin_spin:
    1. Add noise (if enabled)
-   2. Add damping using the noisy field: fmi -= alpha * (fmi × spi)
-   3. Apply Gilbert factor: fmi *= gil_factor (only when temp_flag is true, consistent with original)
+   2. Add damping using the noisy field
+   3. Apply Gilbert factor (only when temp_flag is true)
 ------------------------------------------------------------------------- */
 
-void FixLangevinSpinSIB::compute_single_langevin(int i, double spi[3], double fmi[3])
+void FixLangevinSpinRK4::compute_single_langevin(int i, double spi[3], double fmi[3])
 {
   int *mask = atom->mask;
   if (mask[i] & groupbit) {
-    // Step 1: Add noise (only if temp_flag)
     if (temp_flag) {
       double noise[3];
       noise[0] = random->gaussian();
@@ -214,30 +197,26 @@ void FixLangevinSpinSIB::compute_single_langevin(int i, double spi[3], double fm
       add_noise(fmi, noise);
     }
 
-    // Step 2: Add damping using noisy field
     if (tdamp_flag) add_tdamping(spi, fmi);
 
-    // Step 3: Apply Gilbert factor (only if temp_flag)
     if (temp_flag) apply_gil_factor(fmi);
   }
 }
 
 /* ----------------------------------------------------------------------
-   SIB predictor step: generate noise and store it
-   This is called in the predictor step of SIB
+   RK4 k1 stage: generate noise and store it
 
    Order follows original LAMMPS fix_langevin_spin:
    1. Add noise (if enabled)
-   2. Add damping using the noisy field: fmi -= alpha * (fmi × spi)
-   3. Apply Gilbert factor: fmi *= gil_factor (only when temp_flag is true, consistent with original)
+   2. Add damping using the noisy field
+   3. Apply Gilbert factor (only when temp_flag is true)
 ------------------------------------------------------------------------- */
 
-void FixLangevinSpinSIB::compute_single_langevin_store_noise(int i, double spi[3],
+void FixLangevinSpinRK4::compute_single_langevin_store_noise(int i, double spi[3],
                                                              double fmi[3], double noise_out[3])
 {
   int *mask = atom->mask;
   if (mask[i] & groupbit) {
-    // Step 1: Generate and store noise, add to force
     if (temp_flag) {
       noise_out[0] = random->gaussian();
       noise_out[1] = random->gaussian();
@@ -249,39 +228,27 @@ void FixLangevinSpinSIB::compute_single_langevin_store_noise(int i, double spi[3
       noise_out[2] = 0.0;
     }
 
-    // Step 2: Add damping using noisy field
     if (tdamp_flag) add_tdamping(spi, fmi);
 
-    // Step 3: Apply Gilbert factor
     if (temp_flag) apply_gil_factor(fmi);
   }
 }
 
 /* ----------------------------------------------------------------------
-   SIB corrector step: reuse stored noise
-   This is called in the corrector step of SIB
-   CRITICAL: Must use the same noise as the predictor step!
-
-   Order follows original LAMMPS fix_langevin_spin:
-   1. Add noise (reused from predictor)
-   2. Add damping using the noisy field: fmi -= alpha * (fmi × spi)
-   3. Apply Gilbert factor: fmi *= gil_factor (only when temp_flag is true, consistent with original)
+   RK4 k2-k4 stages: reuse stored noise
 ------------------------------------------------------------------------- */
 
-void FixLangevinSpinSIB::compute_single_langevin_reuse_noise(int i, double spi[3],
+void FixLangevinSpinRK4::compute_single_langevin_reuse_noise(int i, double spi[3],
                                                              double fmi[3], double noise_in[3])
 {
   int *mask = atom->mask;
   if (mask[i] & groupbit) {
-    // Step 1: Reuse stored noise
     if (temp_flag) {
       add_noise(fmi, noise_in);
     }
 
-    // Step 2: Add damping at midpoint state using noisy field
     if (tdamp_flag) add_tdamping(spi, fmi);
 
-    // Step 3: Apply Gilbert factor
     if (temp_flag) apply_gil_factor(fmi);
   }
 }

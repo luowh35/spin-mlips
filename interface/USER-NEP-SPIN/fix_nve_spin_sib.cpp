@@ -34,14 +34,12 @@
 #include "atom.h"
 #include "citeme.h"
 #include "comm.h"
-#include "domain.h"
 #include "error.h"
 #include "fix_langevin_spin_sib.h"
 #include "fix_precession_spin.h"
 #include "force.h"
 #include "memory.h"
 #include "modify.h"
-#include "neighbor.h"
 #include "pair_nep_spin.h"
 #include "update.h"
 
@@ -80,9 +78,7 @@ static const char cite_fix_nve_spin_sib[] =
 FixNVESpinSIB::FixNVESpinSIB(LAMMPS *lmp, int narg, char **arg) :
   Fix(lmp, narg, arg),
   pair_nep_spin(nullptr), locklangevinspin_sib(nullptr),
-  lockprecessionspin(nullptr), s_save(nullptr), s_predict(nullptr),
-  s_mid(nullptr), omega_current(nullptr), omega_mid(nullptr), noise_vec(nullptr),
-  f_save(nullptr)
+  lockprecessionspin(nullptr), s_save(nullptr), noise_vec(nullptr)
 {
   if (lmp->citeme) lmp->citeme->add(cite_fix_nve_spin_sib);
 
@@ -129,12 +125,7 @@ FixNVESpinSIB::FixNVESpinSIB(LAMMPS *lmp, int narg, char **arg) :
 FixNVESpinSIB::~FixNVESpinSIB()
 {
   memory->destroy(s_save);
-  memory->destroy(s_predict);
-  memory->destroy(s_mid);
-  memory->destroy(omega_current);
-  memory->destroy(omega_mid);
   memory->destroy(noise_vec);
-  memory->destroy(f_save);
   delete[] locklangevinspin_sib;
   delete[] lockprecessionspin;
 }
@@ -240,12 +231,7 @@ void FixNVESpinSIB::grow_arrays()
     nlocal_max = atom->nlocal + 100;
   }
   memory->grow(s_save, nlocal_max, 3, "fix_nve_spin_sib:s_save");
-  memory->grow(s_predict, nlocal_max, 3, "fix_nve_spin_sib:s_predict");
-  memory->grow(s_mid, nlocal_max, 3, "fix_nve_spin_sib:s_mid");
-  memory->grow(omega_current, nlocal_max, 3, "fix_nve_spin_sib:omega_current");
-  memory->grow(omega_mid, nlocal_max, 3, "fix_nve_spin_sib:omega_mid");
   memory->grow(noise_vec, nlocal_max, 3, "fix_nve_spin_sib:noise_vec");
-  memory->grow(f_save, nlocal_max, 3, "fix_nve_spin_sib:f_save");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -344,7 +330,8 @@ void FixNVESpinSIB::sib_spin_half_step()
   // Distribute magnetic forces from cached tensor to fm array
   distribute_magnetic_forces();
 
-  // Store omega and add precession/Langevin contributions
+  // Predictor step: s_pred = s_save + (s_save + s_pred)/2 x F_pred
+  // where F_pred = omega(s_current) * dts (dts = dt/2)
   for (int i = 0; i < nlocal; i++) {
     if (mask[i] & groupbit) {
       double spi[3], fmi[3];
@@ -369,39 +356,30 @@ void FixNVESpinSIB::sib_spin_half_step()
         }
       }
 
-      // Store omega at current state
-      omega_current[i][0] = fmi[0];
-      omega_current[i][1] = fmi[1];
-      omega_current[i][2] = fmi[2];
-    }
-  }
-
-  // --- Step C: Predictor step ---
-  // Solve: s_pred = s_save + (s_save + s_pred)/2 x F_pred
-  // where F_pred = omega_current * dts (dts = dt/2)
-  for (int i = 0; i < nlocal; i++) {
-    if (mask[i] & groupbit) {
       double F_pred[3];
-      F_pred[0] = omega_current[i][0] * dts;
-      F_pred[1] = omega_current[i][1] * dts;
-      F_pred[2] = omega_current[i][2] * dts;
+      F_pred[0] = fmi[0] * dts;
+      F_pred[1] = fmi[1] * dts;
+      F_pred[2] = fmi[2] * dts;
+
+      double s_pred[3];
 
       // Solve implicit equation
-      solve_implicit_sib(s_save[i], F_pred, s_predict[i]);
+      solve_implicit_sib(s_save[i], F_pred, s_pred);
 
       // Compute midpoint: s_mid = (s_save + s_pred) / 2
-      s_mid[i][0] = 0.5 * (s_save[i][0] + s_predict[i][0]);
-      s_mid[i][1] = 0.5 * (s_save[i][1] + s_predict[i][1]);
-      s_mid[i][2] = 0.5 * (s_save[i][2] + s_predict[i][2]);
+      double s_mid[3];
+      s_mid[0] = 0.5 * (s_save[i][0] + s_pred[0]);
+      s_mid[1] = 0.5 * (s_save[i][1] + s_pred[1]);
+      s_mid[2] = 0.5 * (s_save[i][2] + s_pred[2]);
 
       // Temporarily update sp to midpoint for field calculation
-      sp[i][0] = s_mid[i][0];
-      sp[i][1] = s_mid[i][1];
-      sp[i][2] = s_mid[i][2];
+      sp[i][0] = s_mid[0];
+      sp[i][1] = s_mid[1];
+      sp[i][2] = s_mid[2];
     }
   }
 
-  // --- Step D: Compute omega(s_mid) - NN call #2 ---
+  // --- Step C: Compute omega(s_mid) - NN call #2 ---
   // Use recompute_forces() which only updates fm, not f
   comm->forward_comm();
   pair_nep_spin->recompute_forces();
@@ -409,7 +387,8 @@ void FixNVESpinSIB::sib_spin_half_step()
   // Distribute magnetic forces from cached tensor to fm array
   distribute_magnetic_forces();
 
-  // Store omega at midpoint and add precession/Langevin contributions
+  // Corrector step: s_new = s_save + (s_save + s_new)/2 x F_corr
+  // where F_corr = omega(s_mid) * dts
   for (int i = 0; i < nlocal; i++) {
     if (mask[i] & groupbit) {
       double spi[3], fmi[3];
@@ -434,26 +413,19 @@ void FixNVESpinSIB::sib_spin_half_step()
         }
       }
 
-      // Store omega at midpoint
-      omega_mid[i][0] = fmi[0];
-      omega_mid[i][1] = fmi[1];
-      omega_mid[i][2] = fmi[2];
-    }
-  }
-
-  // --- Step E: Corrector step ---
-  // Solve: s_new = s_save + (s_save + s_new)/2 x F_corr
-  // where F_corr = omega_mid * dts
-  for (int i = 0; i < nlocal; i++) {
-    if (mask[i] & groupbit) {
       double F_corr[3];
-      F_corr[0] = omega_mid[i][0] * dts;
-      F_corr[1] = omega_mid[i][1] * dts;
-      F_corr[2] = omega_mid[i][2] * dts;
+      F_corr[0] = fmi[0] * dts;
+      F_corr[1] = fmi[1] * dts;
+      F_corr[2] = fmi[2] * dts;
 
       double s_new[3];
       // Solve implicit equation from saved state
       solve_implicit_sib(s_save[i], F_corr, s_new);
+
+      // Expose the effective field (including noise and damping) for diagnostics
+      fm[i][0] = fmi[0];
+      fm[i][1] = fmi[1];
+      fm[i][2] = fmi[2];
 
       // Update spin to new value
       sp[i][0] = s_new[0];
@@ -538,10 +510,11 @@ void FixNVESpinSIB::solve_implicit_sib(double *s_in, double *F_vec, double *s_ou
   // Dot product: F . X
   double dot_FX = Fx * sx + Fy * sy + Fz * sz;
 
-  // Compute midpoint M = [X + 0.5*(X x F) + 0.25*(F.X)*F] / denom
-  double Mx = (sx + 0.5 * cross_x + 0.25 * dot_FX * Fx) / denom;
-  double My = (sy + 0.5 * cross_y + 0.25 * dot_FX * Fy) / denom;
-  double Mz = (sz + 0.5 * cross_z + 0.25 * dot_FX * Fz) / denom;
+  // Compute midpoint M = [X - 0.5*(X x F) + 0.25*(F.X)*F] / denom
+  // Note: The minus sign follows Spirit's sib_transform: a2 = e1 - e1.cross(A)
+  double Mx = (sx - 0.5 * cross_x + 0.25 * dot_FX * Fx) / denom;
+  double My = (sy - 0.5 * cross_y + 0.25 * dot_FX * Fy) / denom;
+  double Mz = (sz - 0.5 * cross_z + 0.25 * dot_FX * Fz) / denom;
 
   // Compute Y = 2*M - X
   s_out[0] = 2.0 * Mx - sx;
