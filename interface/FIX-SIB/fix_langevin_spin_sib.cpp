@@ -13,23 +13,7 @@
 ------------------------------------------------------------------------- */
 
 /* ----------------------------------------------------------------------
-   Langevin thermostat for NEP-SPIN SIB method
-
-   Key features:
-   - Uses dts = dt (full timestep) for noise scaling
-   - Provides two methods for SIB predictor-corrector:
-     1. compute_single_langevin_store_noise: generates and stores noise
-     2. compute_single_langevin_reuse_noise: reuses stored noise
-
-   The stochastic LLG equation in the SIB method requires the same noise
-   to be used in both predictor and corrector steps for correct
-   Stratonovich interpretation.
-
-   Reference:
-   J.H. Mentink, M.V. Tretyakov, A. Fasolino, M.I. Katsnelson, T. Rasing,
-   "Stable and fast semi-implicit integration of the stochastic
-   Landau-Lifshitz equation", J. Phys.: Condens. Matter 22, 176001 (2010)
-   DOI: 10.1088/0953-8984/22/17/176001
+   Langevin thermostat for SPIN-STEP SIB method
 ------------------------------------------------------------------------- */
 
 #include "fix_langevin_spin_sib.h"
@@ -99,8 +83,8 @@ int FixLangevinSpinSIB::setmask()
 void FixLangevinSpinSIB::init()
 {
   // Check if fix nve/spin/sib is defined
-  auto sib_fixes = modify->get_fix_by_style("^nve/spin/sib$");
-  if (sib_fixes.empty())
+  auto ema_fixes = modify->get_fix_by_style("^nve/spin/sib$");
+  if (ema_fixes.empty())
     error->warning(FLERR, "Fix langevin/spin/sib should be used with fix nve/spin/sib");
 
   // Verify this fix comes after force fixes
@@ -120,7 +104,6 @@ void FixLangevinSpinSIB::init()
   gil_factor = 1.0 / (1.0 + alpha_t * alpha_t);
 
   // Use dt/2 for SIB method - each half-step applies noise once
-  // Total variance per timestep: 2 * (sigma * dts)^2 matches original 4 * (sigma_orig * dts_orig)^2
   dts = 0.5 * update->dt;
 
   // Calculate noise strength
@@ -132,9 +115,6 @@ void FixLangevinSpinSIB::init()
 
   // Note: The factor (1 + alpha^2) comes from the transformation to
   // the effective field representation.
-  // Note: We do NOT include 1/mu_s here because pair_nep_spin already
-  // includes mu_s in fm (fm = mu_s * dE/dM / hbar). This is consistent
-  // with the original fix_langevin_spin implementation.
   D = (alpha_t * (1.0 + alpha_t * alpha_t) * kb * temp);
   D /= (hbar * dts);
   sigma = sqrt(2.0 * D);
@@ -142,7 +122,7 @@ void FixLangevinSpinSIB::init()
   if (comm->me == 0) {
     utils::logmesg(lmp, "Fix langevin/spin/sib: Using dts = dt/2 = {} for SIB half-step\n", dts);
     utils::logmesg(lmp, "Fix langevin/spin/sib: sigma = {}, D = {}\n", sigma, D);
-    utils::logmesg(lmp, "Fix langevin/spin/sib: Same noise used in predictor and corrector of each half-step\n");
+    utils::logmesg(lmp, "Fix langevin/spin/sib: Same noise used in predictor and corrector\n");
   }
 }
 
@@ -158,8 +138,6 @@ void FixLangevinSpinSIB::setup(int vflag)
 void FixLangevinSpinSIB::add_tdamping(double spi[3], double fmi[3])
 {
   // Transverse damping: fmi -= alpha * (fmi × spi)
-  // This corresponds to the Gilbert damping term in LLG equation
-  // Note: This should be called AFTER stochastic noise is added so random damping is included
   double cpx = fmi[1] * spi[2] - fmi[2] * spi[1];
   double cpy = fmi[2] * spi[0] - fmi[0] * spi[2];
   double cpz = fmi[0] * spi[1] - fmi[1] * spi[0];
@@ -174,7 +152,6 @@ void FixLangevinSpinSIB::add_tdamping(double spi[3], double fmi[3])
 void FixLangevinSpinSIB::add_noise(double fmi[3], double noise[3])
 {
   // Add stochastic field to effective field
-  // This should be called BEFORE damping is applied
   fmi[0] += sigma * noise[0];
   fmi[1] += sigma * noise[1];
   fmi[2] += sigma * noise[2];
@@ -185,7 +162,6 @@ void FixLangevinSpinSIB::add_noise(double fmi[3], double noise[3])
 void FixLangevinSpinSIB::apply_gil_factor(double fmi[3])
 {
   // Apply Gilbert factor: fmi *= 1/(1+alpha^2)
-  // This should be called AFTER both noise and damping are applied
   fmi[0] *= gil_factor;
   fmi[1] *= gil_factor;
   fmi[2] *= gil_factor;
@@ -194,11 +170,6 @@ void FixLangevinSpinSIB::apply_gil_factor(double fmi[3])
 /* ----------------------------------------------------------------------
    Standard Langevin computation (for compatibility)
    Generates new noise each time
-
-   Order follows original LAMMPS fix_langevin_spin:
-   1. Add noise (if enabled)
-   2. Add damping using the noisy field: fmi -= alpha * (fmi × spi)
-   3. Apply Gilbert factor: fmi *= gil_factor (only when temp_flag is true, consistent with original)
 ------------------------------------------------------------------------- */
 
 void FixLangevinSpinSIB::compute_single_langevin(int i, double spi[3], double fmi[3])
@@ -224,12 +195,6 @@ void FixLangevinSpinSIB::compute_single_langevin(int i, double spi[3], double fm
 
 /* ----------------------------------------------------------------------
    SIB predictor step: generate noise and store it
-   This is called in the predictor step of SIB
-
-   Order follows original LAMMPS fix_langevin_spin:
-   1. Add noise (if enabled)
-   2. Add damping using the noisy field: fmi -= alpha * (fmi × spi)
-   3. Apply Gilbert factor: fmi *= gil_factor (only when temp_flag is true, consistent with original)
 ------------------------------------------------------------------------- */
 
 void FixLangevinSpinSIB::compute_single_langevin_store_noise(int i, double spi[3],
@@ -259,13 +224,7 @@ void FixLangevinSpinSIB::compute_single_langevin_store_noise(int i, double spi[3
 
 /* ----------------------------------------------------------------------
    SIB corrector step: reuse stored noise
-   This is called in the corrector step of SIB
    CRITICAL: Must use the same noise as the predictor step!
-
-   Order follows original LAMMPS fix_langevin_spin:
-   1. Add noise (reused from predictor)
-   2. Add damping using the noisy field: fmi -= alpha * (fmi × spi)
-   3. Apply Gilbert factor: fmi *= gil_factor (only when temp_flag is true, consistent with original)
 ------------------------------------------------------------------------- */
 
 void FixLangevinSpinSIB::compute_single_langevin_reuse_noise(int i, double spi[3],

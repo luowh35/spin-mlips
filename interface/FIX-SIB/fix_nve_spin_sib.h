@@ -12,11 +12,11 @@
 ------------------------------------------------------------------------- */
 
 /* ----------------------------------------------------------------------
-   NEP-SPIN Semi-Implicit B (SIB) Method with Spin-Lattice Coupling
+   Semi-Implicit B (SIB) Method with Spin-Lattice Coupling
 
    This fix implements the SIB predictor-corrector method for spin dynamics
-   coupled with molecular dynamics, following the framework of Tranchida et al.
-   (2018) but replacing Suzuki-Trotter with SIB for spin updates.
+   coupled with molecular dynamics. It works with any pair style that
+   inherits from PairSpinML (e.g., spin/step, spin/nep).
 
    Algorithm:
 
@@ -30,34 +30,20 @@
         - Corrector: s^{n+1/2}
      3. x^{n+1} = x^n + dt * v^{n+1/2}              [position full step]
      4. SIB spin update (dt/2):                      [second half spin step]
-        - NN call #3: compute omega(s^{n+1/2})
-        - Predictor: s_pred
-        - s_mid = (s^{n+1/2} + s_pred) / 2
-        - NN call #4: compute omega(s_mid)
-        - Corrector: s^{n+1}
 
    [LAMMPS calls pair->compute() for new forces]
 
    final_integrate():
      5. v^{n+1} = v^{n+1/2} + (dt/2) * f^{n+1}      [velocity complete]
 
-   Properties:
-   - Second-order accuracy O(dt^2) for both spin and lattice
-   - Unconditionally stable for spin dynamics
-   - Exactly preserves |s| = 1
-   - 4 NN calls per timestep (same as Suzuki-Trotter)
-   - Proper spin-lattice coupling following Tranchida et al. (2018)
-
    References:
    [1] J.H. Mentink et al., J. Phys.: Condens. Matter 22, 176001 (2010)
-       DOI: 10.1088/0953-8984/22/17/176001
    [2] J. Tranchida et al., J. Comput. Phys. 372, 406-425 (2018)
-       DOI: 10.1016/j.jcp.2018.06.042
 ------------------------------------------------------------------------- */
 
 #ifdef FIX_CLASS
 // clang-format off
-FixStyle(nve/spin/sib,FixNVESpinSIB);
+FixStyle(nve/spin/sib,FixNVESpinSIB)
 // clang-format on
 #else
 
@@ -67,6 +53,11 @@ FixStyle(nve/spin/sib,FixNVESpinSIB);
 #include "fix.h"
 
 namespace LAMMPS_NS {
+
+// Forward declarations
+class FixLangevinSpinSIB;
+class FixPrecessionSpin;
+class PairSpinML;
 
 class FixNVESpinSIB : public Fix {
  public:
@@ -87,27 +78,22 @@ class FixNVESpinSIB : public Fix {
 
   int nlocal_max;    // max value of nlocal (for size of arrays)
 
-  // Pointer to NEP-SPIN pair style
-  class PairNEPSpin *pair_nep_spin;
+  // Pointer to ML spin pair style (base class)
+  PairSpinML *pair_spin_ml;
 
   // Pointers to fix langevin/spin/sib styles
   int nlangspin_sib;
   int maglangevin_sib_flag;
-  class FixLangevinSpinSIB **locklangevinspin_sib;
+  FixLangevinSpinSIB **locklangevinspin_sib;
 
   // Pointers to fix precession/spin styles
   int nprecspin;
   int precession_spin_flag;
-  class FixPrecessionSpin **lockprecessionspin;
+  FixPrecessionSpin **lockprecessionspin;
 
   // Storage for SIB predictor-corrector method
   double **s_save;         // saved spin at start of half-step
-  double **s_predict;      // predicted spin from predictor step
-  double **s_mid;          // midpoint spin (s_save + s_pred) / 2
-  double **omega_current;  // effective field at current state
-  double **omega_mid;      // effective field at midpoint state
   double **noise_vec;      // stored noise vector (same for predictor and corrector)
-  double **f_save;         // saved atomic forces before spin update (for spin-lattice coupling)
 
   // Helper functions
   void sib_spin_half_step();  // perform one SIB half-step update
