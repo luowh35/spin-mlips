@@ -13,20 +13,8 @@
 ------------------------------------------------------------------------- */
 
 /* ----------------------------------------------------------------------
-   NEP-SPIN Semi-Implicit B (SIB) Method with Spin-Lattice Coupling
-
-   This fix implements the SIB predictor-corrector method for spin dynamics
-   coupled with molecular dynamics, following the framework of Tranchida et al.
-   (2018) but replacing Suzuki-Trotter with SIB for spin updates.
-
-   The algorithm uses two SIB half-steps (dt/2 each) sandwiching the position
-   update, ensuring proper spin-lattice coupling with second-order accuracy.
-
-   References:
-   [1] J.H. Mentink et al., J. Phys.: Condens. Matter 22, 176001 (2010)
-       DOI: 10.1088/0953-8984/22/17/176001
-   [2] J. Tranchida et al., J. Comput. Phys. 372, 406-425 (2018)
-       DOI: 10.1016/j.jcp.2018.06.042
+   SPIN-STEP SIB Method with Spin-Lattice Coupling
+   Adapted from NEP-SPIN implementation for use with pair_style spin/step
 ------------------------------------------------------------------------- */
 
 #include "fix_nve_spin_sib.h"
@@ -40,7 +28,7 @@
 #include "force.h"
 #include "memory.h"
 #include "modify.h"
-#include "pair_nep_spin.h"
+#include "pair_spin_ml.h"
 #include "update.h"
 
 #include <cmath>
@@ -77,7 +65,7 @@ static const char cite_fix_nve_spin_sib[] =
 
 FixNVESpinSIB::FixNVESpinSIB(LAMMPS *lmp, int narg, char **arg) :
   Fix(lmp, narg, arg),
-  pair_nep_spin(nullptr), locklangevinspin_sib(nullptr),
+  pair_spin_ml(nullptr), locklangevinspin_sib(nullptr),
   lockprecessionspin(nullptr), s_save(nullptr), noise_vec(nullptr)
 {
   if (lmp->citeme) lmp->citeme->add(cite_fix_nve_spin_sib);
@@ -117,7 +105,7 @@ FixNVESpinSIB::FixNVESpinSIB(LAMMPS *lmp, int narg, char **arg) :
 
   // Check if atom/spin style is defined
   if (!atom->sp_flag)
-    error->all(FLERR, "Fix nve/spin/sib requires atom/spin style");
+    error->all(FLERR, "Fix nve/spin/sib requires atom_style spin");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -150,10 +138,14 @@ void FixNVESpinSIB::init()
   // dts = dt/2 for half-step SIB updates (two half-steps per full timestep)
   dts = 0.5 * update->dt;
 
-  // Find NEP-SPIN pair style
-  pair_nep_spin = dynamic_cast<PairNEPSpin *>(force->pair_match("spin/nep", 0, 0));
-  if (!pair_nep_spin)
-    error->all(FLERR, "Fix nve/spin/sib requires pair_style spin/nep");
+  // Find ML spin pair style (spin/step, spin/nep, or other PairSpinML derivatives)
+  // First try spin/step
+  pair_spin_ml = dynamic_cast<PairSpinML *>(force->pair_match("spin/step", 0, 0));
+  // If not found, try spin/nep
+  if (!pair_spin_ml)
+    pair_spin_ml = dynamic_cast<PairSpinML *>(force->pair_match("spin/nep", 0, 0));
+  if (!pair_spin_ml)
+    error->all(FLERR, "Fix nve/spin/sib requires pair_style spin/step or spin/nep");
 
   // Find fix precession/spin styles
   int iforce;
@@ -206,6 +198,7 @@ void FixNVESpinSIB::init()
 
   if (comm->me == 0) {
     utils::logmesg(lmp, "Fix nve/spin/sib: SIB method with spin-lattice coupling\n");
+    utils::logmesg(lmp, "Fix nve/spin/sib: Using PairSpinML base class interface\n");
     utils::logmesg(lmp, "Fix nve/spin/sib: dts = dt/2 = {} for half-step updates\n", dts);
     utils::logmesg(lmp, "Fix nve/spin/sib: 4 NN calls per timestep (2 per half-step)\n");
     if (lattice_flag)
@@ -220,7 +213,7 @@ void FixNVESpinSIB::init()
 void FixNVESpinSIB::setup(int vflag)
 {
   // Initial force computation
-  pair_nep_spin->compute(1, 1);
+  pair_spin_ml->compute(1, 1);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -289,15 +282,6 @@ void FixNVESpinSIB::initial_integrate(int /*vflag*/)
 /* ----------------------------------------------------------------------
    Perform one SIB half-step update (dt/2) using predictor-corrector
    This requires 2 NN calls per half-step
-
-   IMPORTANT: For spin-lattice coupling, we use recompute_forces() instead
-   of compute() during spin updates. This is because:
-   - compute() calculates both atomic forces (f) and magnetic forces (fm)
-   - recompute_forces() only calculates magnetic forces (fm)
-
-   During spin updates, we only want to update fm, not f. The atomic forces
-   should only be updated by LAMMPS's main force computation loop after
-   position updates, not during intermediate spin updates.
 ------------------------------------------------------------------------- */
 
 void FixNVESpinSIB::sib_spin_half_step()
@@ -323,15 +307,13 @@ void FixNVESpinSIB::sib_spin_half_step()
   }
 
   // --- Step B: Compute omega(s_current) - NN call #1 ---
-  // Use recompute_forces() which only updates fm, not f
   comm->forward_comm();
-  pair_nep_spin->recompute_forces();
+  pair_spin_ml->recompute_forces();
 
   // Distribute magnetic forces from cached tensor to fm array
   distribute_magnetic_forces();
 
-  // Predictor step: s_pred = s_save + (s_save + s_pred)/2 x F_pred
-  // where F_pred = omega(s_current) * dts (dts = dt/2)
+  // Predictor step
   for (int i = 0; i < nlocal; i++) {
     if (mask[i] & groupbit) {
       double spi[3], fmi[3];
@@ -380,15 +362,13 @@ void FixNVESpinSIB::sib_spin_half_step()
   }
 
   // --- Step C: Compute omega(s_mid) - NN call #2 ---
-  // Use recompute_forces() which only updates fm, not f
   comm->forward_comm();
-  pair_nep_spin->recompute_forces();
+  pair_spin_ml->recompute_forces();
 
   // Distribute magnetic forces from cached tensor to fm array
   distribute_magnetic_forces();
 
-  // Corrector step: s_new = s_save + (s_save + s_new)/2 x F_corr
-  // where F_corr = omega(s_mid) * dts
+  // Corrector step
   for (int i = 0; i < nlocal; i++) {
     if (mask[i] & groupbit) {
       double spi[3], fmi[3];
@@ -422,7 +402,7 @@ void FixNVESpinSIB::sib_spin_half_step()
       // Solve implicit equation from saved state
       solve_implicit_sib(s_save[i], F_corr, s_new);
 
-      // Expose the effective field (including noise and damping) for diagnostics
+      // Expose the effective field for diagnostics
       fm[i][0] = fmi[0];
       fm[i][1] = fmi[1];
       fm[i][2] = fmi[2];
@@ -473,12 +453,6 @@ void FixNVESpinSIB::final_integrate()
    Solve the implicit SIB equation:
      Y = X + (X + Y)/2 x F
 
-   This can be rewritten as:
-     Y - 0.5 * (Y x F) = X + 0.5 * (X x F)
-     (I + 0.5 * [F]_x) Y = X + 0.5 * (X x F)
-
-   where [F]_x is the skew-symmetric matrix of F.
-
    The solution using the analytical inverse is:
      M = (X + Y)/2 = [X + 0.5*(X x F) + 0.25*(F.X)*F] / (1 + |F|^2/4)
      Y = 2*M - X
@@ -510,8 +484,7 @@ void FixNVESpinSIB::solve_implicit_sib(double *s_in, double *F_vec, double *s_ou
   // Dot product: F . X
   double dot_FX = Fx * sx + Fy * sy + Fz * sz;
 
-  // Compute midpoint M = [X - 0.5*(X x F) + 0.25*(F.X)*F] / denom
-  // Note: The minus sign follows Spirit's sib_transform: a2 = e1 - e1.cross(A)
+  // Compute midpoint M
   double Mx = (sx - 0.5 * cross_x + 0.25 * dot_FX * Fx) / denom;
   double My = (sy - 0.5 * cross_y + 0.25 * dot_FX * Fy) / denom;
   double Mz = (sz - 0.5 * cross_z + 0.25 * dot_FX * Fz) / denom;
@@ -521,7 +494,7 @@ void FixNVESpinSIB::solve_implicit_sib(double *s_in, double *F_vec, double *s_ou
   s_out[1] = 2.0 * My - sy;
   s_out[2] = 2.0 * Mz - sz;
 
-  // Renormalize for numerical stability (should be very close to 1 already)
+  // Renormalize for numerical stability
   double norm = sqrt(s_out[0]*s_out[0] + s_out[1]*s_out[1] + s_out[2]*s_out[2]);
   if (norm > 1e-10) {
     s_out[0] /= norm;
@@ -531,8 +504,7 @@ void FixNVESpinSIB::solve_implicit_sib(double *s_in, double *F_vec, double *s_ou
 }
 
 /* ----------------------------------------------------------------------
-   Distribute cached magnetic forces from pair_nep_spin to fm array
-   This is called after recompute_forces() to update fm without touching f
+   Distribute cached magnetic forces from pair_spin_step to fm array
 ------------------------------------------------------------------------- */
 
 void FixNVESpinSIB::distribute_magnetic_forces()
@@ -550,6 +522,6 @@ void FixNVESpinSIB::distribute_magnetic_forces()
     }
   }
 
-  // Distribute cached magnetic forces from pair_nep_spin
-  pair_nep_spin->distribute_cached_mag_forces();
+  // Distribute cached magnetic forces from pair_spin_ml
+  pair_spin_ml->distribute_cached_mag_forces();
 }

@@ -25,7 +25,7 @@ PairStyle(spin/nep, PairNEPSpin)
 #ifndef LMP_PAIR_NEP_SPIN_H
 #define LMP_PAIR_NEP_SPIN_H
 
-#include "pair_spin.h"
+#include "pair_spin_ml.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -35,7 +35,7 @@ namespace LAMMPS_NS {
 // Forward declaration - implementation hidden in cpp file
 struct PairNEPSpinImpl;
 
-class PairNEPSpin : public PairSpin {
+class PairNEPSpin : public PairSpinML {
  public:
   PairNEPSpin(class LAMMPS *);
   ~PairNEPSpin() override;
@@ -51,11 +51,11 @@ class PairNEPSpin : public PairSpin {
   // PairSpin interface for spin dynamics
   void compute_single_pair(int, double *) override;
 
-  // For SIB method: get cached magnetic forces and distribute to fm array
-  void distribute_cached_mag_forces();
+  // PairSpinML interface - distribute cached magnetic forces to fm array
+  void distribute_cached_mag_forces() override;
 
-  // Recompute magnetic forces only (without atomic forces)
-  void recompute_forces();
+  // PairSpinML interface - recompute magnetic forces only
+  void recompute_forces() override;
 
  protected:
   // pimpl to hide torch dependencies

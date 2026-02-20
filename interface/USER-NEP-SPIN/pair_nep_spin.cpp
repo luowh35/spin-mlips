@@ -281,7 +281,7 @@ namespace {
 
 /* ---------------------------------------------------------------------- */
 
-PairNEPSpin::PairNEPSpin(LAMMPS *lmp) : PairSpin(lmp)
+PairNEPSpin::PairNEPSpin(LAMMPS *lmp) : PairSpinML(lmp)
 {
   writedata = 0;
   single_enable = 0;

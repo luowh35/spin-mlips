@@ -12,10 +12,10 @@
 ------------------------------------------------------------------------- */
 
 /* ----------------------------------------------------------------------
-   Langevin thermostat for NEP-SPIN SIB method
+   Langevin thermostat for SPIN-STEP SIB method
 
-   This fix is designed to work with fix nve/spin/sib which uses the full
-   SIB predictor-corrector method (2 NN calls per timestep).
+   This fix is designed to work with fix nve/spin/sib which uses the
+   SIB predictor-corrector method.
 
    Key features for SIB:
    1. compute_single_langevin_store_noise(): generates and stores noise
@@ -31,12 +31,11 @@
    J.H. Mentink, M.V. Tretyakov, A. Fasolino, M.I. Katsnelson, T. Rasing,
    "Stable and fast semi-implicit integration of the stochastic
    Landau-Lifshitz equation", J. Phys.: Condens. Matter 22, 176001 (2010)
-   DOI: 10.1088/0953-8984/22/17/176001
 ------------------------------------------------------------------------- */
 
 #ifdef FIX_CLASS
 // clang-format off
-FixStyle(langevin/spin/sib,FixLangevinSpinSIB);
+FixStyle(langevin/spin/sib,FixLangevinSpinSIB)
 // clang-format on
 #else
 
@@ -68,7 +67,7 @@ class FixLangevinSpinSIB : public Fix {
 
  protected:
   double alpha_t;       // transverse mag. damping
-  double dts;           // magnetic timestep (dt for SIB method)
+  double dts;           // magnetic timestep (dt/2 for SIB method)
   double temp;          // spin bath temperature
   double D, sigma;      // bath intensity var.
   double gil_factor;    // gilbert's prefactor

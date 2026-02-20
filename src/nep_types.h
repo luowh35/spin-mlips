@@ -9,6 +9,22 @@
 
 namespace nep {
 
+// Atomic system data structure (for XYZ reader)
+struct AtomicSystem {
+    int n_atoms = 0;                          // Number of atoms
+    torch::Tensor positions;                  // [N, 3] Atomic positions
+    torch::Tensor numbers;                    // [N] Atomic numbers
+    torch::Tensor magmoms;                    // [N, 3] Magnetic moments
+    torch::Tensor cell;                       // [3, 3] Unit cell
+    torch::Tensor pbc;                        // [3] Periodic boundary conditions
+    std::vector<std::string> elements;        // Element symbols
+
+    // Reference data (optional)
+    torch::Tensor ref_energy;                 // Reference energy
+    torch::Tensor ref_forces;                 // [N, 3] Reference forces
+    bool has_ref_data = false;                // Whether reference data is available
+};
+
 // Neighbor list data structure
 struct NeighborList {
     torch::Tensor center_indices;    // [M] Central atom indices

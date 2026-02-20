@@ -1,20 +1,27 @@
-# USER-NEP-SPIN package configuration
-# NEP-SPIN: Machine Learning Spin potential for LAMMPS using NEP
+# USER-SPIN-STEP package configuration
+# SPIN-STEP: Machine Learning Spin potential for LAMMPS
 #
-# This package provides pair_style spin/nep for magnetic systems.
+# This package provides pair_style spin/step for magnetic systems
+# using STEP models based on e3nn equivariant neural networks.
 #
 # The fix nve/spin/sib and fix langevin/spin/sib are provided by
 # the shared USER-SPIN-ML package.
 #
 # Requirements:
-# - LAMMPS SPIN package (for atom_style spin)
+# - LAMMPS SPIN package (for atom_style spin and fix nve/spin)
 # - USER-SPIN-ML package (for fix nve/spin/sib and fix langevin/spin/sib)
 # - LibTorch (PyTorch C++ API) >= 2.0
 # - C++17 compatible compiler
 #
 # Usage:
-#   cmake -DPKG_SPIN=ON -DPKG_USER-SPIN-ML=ON -DPKG_USER-NEP-SPIN=ON \
+#   cmake -DPKG_SPIN=ON -DPKG_USER-SPIN-ML=ON -DPKG_USER-SPIN-STEP=ON \
 #         -DCMAKE_PREFIX_PATH=/path/to/libtorch \
+#         ../cmake
+#
+# Or if using conda-installed PyTorch:
+#   LIBTORCH_PATH=$(python -c "import torch; print(torch.utils.cmake_prefix_path)")
+#   cmake -DPKG_SPIN=ON -DPKG_USER-SPIN-ML=ON -DPKG_USER-SPIN-STEP=ON \
+#         -DCMAKE_PREFIX_PATH=$LIBTORCH_PATH \
 #         ../cmake
 
 # =============================================================================
@@ -23,13 +30,13 @@
 
 # Require SPIN package
 if(NOT PKG_SPIN)
-  message(FATAL_ERROR "USER-NEP-SPIN package requires SPIN package. "
+  message(FATAL_ERROR "USER-SPIN-STEP package requires SPIN package. "
                       "Please enable with -DPKG_SPIN=ON")
 endif()
 
 # Require USER-SPIN-ML package (provides fix nve/spin/sib, fix langevin/spin/sib, pair_spin_ml.h)
 if(NOT PKG_USER-SPIN-ML)
-  message(FATAL_ERROR "USER-NEP-SPIN package requires USER-SPIN-ML package. "
+  message(FATAL_ERROR "USER-SPIN-STEP package requires USER-SPIN-ML package. "
                       "Please enable with -DPKG_USER-SPIN-ML=ON")
 endif()
 
@@ -45,9 +52,9 @@ endif()
 find_package(Torch REQUIRED)
 
 if(Torch_FOUND)
-  message(STATUS "USER-NEP-SPIN: Found PyTorch ${Torch_VERSION}")
-  message(STATUS "USER-NEP-SPIN: Torch libraries: ${TORCH_LIBRARIES}")
-  message(STATUS "USER-NEP-SPIN: Torch include dirs: ${TORCH_INCLUDE_DIRS}")
+  message(STATUS "USER-SPIN-STEP: Found PyTorch ${Torch_VERSION}")
+  message(STATUS "USER-SPIN-STEP: Torch libraries: ${TORCH_LIBRARIES}")
+  message(STATUS "USER-SPIN-STEP: Torch include dirs: ${TORCH_INCLUDE_DIRS}")
 
   # Clean up all invalid paths from torch-related targets
   foreach(_target torch torch_library c10 c10_cuda)
@@ -64,38 +71,17 @@ if(Torch_FOUND)
   # Source Files
   # =============================================================================
 
-  # Base source files
-  set(NEP_SPIN_SOURCES
-    ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/pair_nep_spin.cpp
-    ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/nep_spin_data.cpp
+  set(SPIN_STEP_SOURCES
+    ${LAMMPS_SOURCE_DIR}/USER-SPIN-STEP/pair_spin_step.cpp
+    ${LAMMPS_SOURCE_DIR}/USER-SPIN-STEP/step_utils.cpp
   )
-
-  # Optional: RK4 integrator (alternative to SIB)
-  if(EXISTS "${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/fix_nve_spin_rk4.cpp")
-    list(APPEND NEP_SPIN_SOURCES
-      ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/fix_nve_spin_rk4.cpp
-      ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/fix_langevin_spin_rk4.cpp
-    )
-    message(STATUS "USER-NEP-SPIN: RK4 integrator enabled")
-  endif()
-
-  # Add Kokkos source files if KOKKOS package is enabled
-  if(PKG_KOKKOS)
-    message(STATUS "USER-NEP-SPIN: Kokkos support enabled")
-    list(APPEND NEP_SPIN_SOURCES
-      ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN/pair_nep_spin_kokkos.cpp
-    )
-    target_compile_definitions(lammps PRIVATE NEP_SPIN_KOKKOS)
-  else()
-    message(STATUS "USER-NEP-SPIN: Kokkos support disabled (enable with -DPKG_KOKKOS=ON)")
-  endif()
 
   # =============================================================================
   # Build Configuration
   # =============================================================================
 
   # Add sources to LAMMPS
-  target_sources(lammps PRIVATE ${NEP_SPIN_SOURCES})
+  target_sources(lammps PRIVATE ${SPIN_STEP_SOURCES})
 
   # Link LibTorch
   target_link_libraries(lammps PUBLIC ${TORCH_LIBRARIES})
@@ -110,21 +96,21 @@ if(Torch_FOUND)
     $<$<COMPILE_LANGUAGE:CXX>:-Wno-unused-parameter>
   )
 
-  # Add USER-NEP-SPIN include directory
-  target_include_directories(lammps PRIVATE ${LAMMPS_SOURCE_DIR}/USER-NEP-SPIN)
+  # Add USER-SPIN-STEP include directory
+  target_include_directories(lammps PRIVATE ${LAMMPS_SOURCE_DIR}/USER-SPIN-STEP)
 
   # Add preprocessor definitions
-  target_compile_definitions(lammps PRIVATE USE_NEP_SPIN)
+  target_compile_definitions(lammps PRIVATE USE_SPIN_STEP)
 
   # =============================================================================
   # CUDA Support
   # =============================================================================
 
   if(TORCH_CUDA_AVAILABLE)
-    message(STATUS "USER-NEP-SPIN: CUDA support enabled")
+    message(STATUS "USER-SPIN-STEP: CUDA support enabled")
     target_compile_definitions(lammps PRIVATE TORCH_CUDA_AVAILABLE)
   else()
-    message(STATUS "USER-NEP-SPIN: CPU-only mode")
+    message(STATUS "USER-SPIN-STEP: CPU-only mode")
   endif()
 
   # =============================================================================
@@ -132,16 +118,16 @@ if(Torch_FOUND)
   # =============================================================================
 
   message(STATUS "")
-  message(STATUS "USER-NEP-SPIN Configuration Summary:")
+  message(STATUS "USER-SPIN-STEP Configuration Summary:")
   message(STATUS "  PyTorch Version: ${Torch_VERSION}")
   message(STATUS "  CUDA Available: ${TORCH_CUDA_AVAILABLE}")
-  message(STATUS "  Source Files: ${NEP_SPIN_SOURCES}")
+  message(STATUS "  Source Files: ${SPIN_STEP_SOURCES}")
   message(STATUS "  Depends on: USER-SPIN-ML (fix nve/spin/sib, fix langevin/spin/sib)")
   message(STATUS "")
 
 else()
   message(FATAL_ERROR
-    "USER-NEP-SPIN: PyTorch (LibTorch) not found.\n"
+    "USER-SPIN-STEP: PyTorch (LibTorch) not found.\n"
     "Please set CMAKE_PREFIX_PATH to LibTorch location.\n"
     "If using conda-installed PyTorch, try:\n"
     "  LIBTORCH_PATH=$(python -c \"import torch; print(torch.utils.cmake_prefix_path)\")\n"
