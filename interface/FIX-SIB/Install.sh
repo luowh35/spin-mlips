@@ -29,4 +29,6 @@ action fix_nve_spin_sib.cpp
 action fix_nve_spin_sib.h
 action fix_langevin_spin_sib.cpp
 action fix_langevin_spin_sib.h
+action fix_glangevin_spin_sib.cpp
+action fix_glangevin_spin_sib.h
 action pair_spin_ml.h
