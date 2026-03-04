@@ -24,6 +24,7 @@
 #include "comm.h"
 #include "error.h"
 #include "fix_langevin_spin_sib.h"
+#include "fix_glangevin_spin_sib.h"
 #include "fix_precession_spin.h"
 #include "force.h"
 #include "memory.h"
@@ -66,7 +67,9 @@ static const char cite_fix_nve_spin_sib[] =
 FixNVESpinSIB::FixNVESpinSIB(LAMMPS *lmp, int narg, char **arg) :
   Fix(lmp, narg, arg),
   pair_spin_ml(nullptr), locklangevinspin_sib(nullptr),
-  lockprecessionspin(nullptr), s_save(nullptr), noise_vec(nullptr)
+  lockglangevinspin_sib(nullptr),
+  lockprecessionspin(nullptr), s_save(nullptr), noise_vec(nullptr),
+  noise_L_vec(nullptr), fm_full(nullptr)
 {
   if (lmp->citeme) lmp->citeme->add(cite_fix_nve_spin_sib);
 
@@ -77,9 +80,10 @@ FixNVESpinSIB::FixNVESpinSIB(LAMMPS *lmp, int narg, char **arg) :
   nlocal_max = 0;
 
   // Initialize flags
-  nprecspin = nlangspin_sib = 0;
+  nprecspin = nlangspin_sib = nglangspin_sib = 0;
   precession_spin_flag = 0;
   maglangevin_sib_flag = 0;
+  magglangevin_sib_flag = 0;
 
   // Check if atom map is defined
   if (atom->map_style == Atom::MAP_NONE)
@@ -114,7 +118,10 @@ FixNVESpinSIB::~FixNVESpinSIB()
 {
   memory->destroy(s_save);
   memory->destroy(noise_vec);
+  memory->destroy(noise_L_vec);
+  memory->destroy(fm_full);
   delete[] locklangevinspin_sib;
+  delete[] lockglangevinspin_sib;
   delete[] lockprecessionspin;
 }
 
@@ -192,6 +199,28 @@ void FixNVESpinSIB::init()
     }
   }
 
+  // Find fix glangevin/spin/sib styles (generalized Langevin for variable-length spins)
+  nglangspin_sib = 0;
+  for (iforce = 0; iforce < modify->nfix; iforce++) {
+    if (strcmp(modify->fix[iforce]->style, "glangevin/spin/sib") == 0) {
+      nglangspin_sib++;
+    }
+  }
+
+  if (nglangspin_sib > 0) {
+    delete[] lockglangevinspin_sib;
+    lockglangevinspin_sib = new FixGLangevinSpinSIB *[nglangspin_sib];
+
+    int count = 0;
+    for (iforce = 0; iforce < modify->nfix; iforce++) {
+      if (strcmp(modify->fix[iforce]->style, "glangevin/spin/sib") == 0) {
+        magglangevin_sib_flag = 1;
+        lockglangevinspin_sib[count] = dynamic_cast<FixGLangevinSpinSIB *>(modify->fix[iforce]);
+        count++;
+      }
+    }
+  }
+
   // Allocate arrays
   nlocal_max = atom->nlocal;
   grow_arrays();
@@ -205,6 +234,8 @@ void FixNVESpinSIB::init()
       utils::logmesg(lmp, "Fix nve/spin/sib: Lattice dynamics enabled (spin-lattice coupling)\n");
     else
       utils::logmesg(lmp, "Fix nve/spin/sib: Lattice frozen (pure spin dynamics)\n");
+    if (magglangevin_sib_flag)
+      utils::logmesg(lmp, "Fix nve/spin/sib: Variable-length spin mode (glangevin/spin/sib detected)\n");
   }
 }
 
@@ -225,6 +256,8 @@ void FixNVESpinSIB::grow_arrays()
   }
   memory->grow(s_save, nlocal_max, 3, "fix_nve_spin_sib:s_save");
   memory->grow(noise_vec, nlocal_max, 3, "fix_nve_spin_sib:noise_vec");
+  memory->grow(noise_L_vec, nlocal_max, "fix_nve_spin_sib:noise_L_vec");
+  memory->grow(fm_full, nlocal_max, 3, "fix_nve_spin_sib:fm_full");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -303,6 +336,7 @@ void FixNVESpinSIB::sib_spin_half_step()
       noise_vec[i][0] = 0.0;
       noise_vec[i][1] = 0.0;
       noise_vec[i][2] = 0.0;
+      noise_L_vec[i] = 0.0;
     }
   }
 
@@ -338,6 +372,13 @@ void FixNVESpinSIB::sib_spin_half_step()
         }
       }
 
+      // Add generalized Langevin transverse contributions and store noise
+      if (magglangevin_sib_flag) {
+        for (int k = 0; k < nglangspin_sib; k++) {
+          lockglangevinspin_sib[k]->compute_single_langevin_store_noise(i, spi, fmi, noise_vec[i]);
+        }
+      }
+
       double F_pred[3];
       F_pred[0] = fmi[0] * dts;
       F_pred[1] = fmi[1] * dts;
@@ -368,6 +409,11 @@ void FixNVESpinSIB::sib_spin_half_step()
   // Distribute magnetic forces from cached tensor to fm array
   distribute_magnetic_forces();
 
+  // Distribute full (unprojected) magnetic forces for longitudinal dynamics
+  if (magglangevin_sib_flag) {
+    pair_spin_ml->distribute_full_mag_forces(fm_full, nlocal);
+  }
+
   // Corrector step
   for (int i = 0; i < nlocal; i++) {
     if (mask[i] & groupbit) {
@@ -386,10 +432,26 @@ void FixNVESpinSIB::sib_spin_half_step()
         }
       }
 
+      // Save raw energy gradient for longitudinal dynamics.
+      // fm_full contains -dE/dm in eV/μ_B (raw gradient, no mag/hbar conversion).
+      // Precession is NOT added here because it's in rad/ps units (incompatible),
+      // and precession (s × H) is purely transverse anyway.
+      double fmi_det[3];
+      fmi_det[0] = fm_full[i][0];
+      fmi_det[1] = fm_full[i][1];
+      fmi_det[2] = fm_full[i][2];
+
       // Add Langevin contributions using SAME noise as predictor step
       if (maglangevin_sib_flag) {
         for (int k = 0; k < nlangspin_sib; k++) {
           locklangevinspin_sib[k]->compute_single_langevin_reuse_noise(i, spi, fmi, noise_vec[i]);
+        }
+      }
+
+      // Add generalized Langevin transverse contributions using SAME noise as predictor step
+      if (magglangevin_sib_flag) {
+        for (int k = 0; k < nglangspin_sib; k++) {
+          lockglangevinspin_sib[k]->compute_single_langevin_reuse_noise(i, spi, fmi, noise_vec[i]);
         }
       }
 
@@ -411,6 +473,16 @@ void FixNVESpinSIB::sib_spin_half_step()
       sp[i][0] = s_new[0];
       sp[i][1] = s_new[1];
       sp[i][2] = s_new[2];
+
+      // Longitudinal dynamics: update spin magnitude sp[3]
+      // Uses the FULL deterministic field (including longitudinal component
+      // dE/d|m|) without transverse stochastic noise, matching SPILADY's
+      // Parts 2&4: ds += gamma_HL * dt * (Heff_H + Heff_L).
+      if (magglangevin_sib_flag) {
+        for (int k = 0; k < nglangspin_sib; k++) {
+          lockglangevinspin_sib[k]->compute_longitudinal_step(i, s_new, fmi_det, noise_L_vec[i], dts);
+        }
+      }
     }
   }
 
@@ -457,7 +529,8 @@ void FixNVESpinSIB::final_integrate()
      M = (X + Y)/2 = [X + 0.5*(X x F) + 0.25*(F.X)*F] / (1 + |F|^2/4)
      Y = 2*M - X
 
-   This exactly preserves |Y| = |X| = 1.
+   This exactly preserves |Y| = |X| = 1 for transverse dynamics.
+   Spin magnitude changes are handled separately via sp[3].
 ------------------------------------------------------------------------- */
 
 void FixNVESpinSIB::solve_implicit_sib(double *s_in, double *F_vec, double *s_out)
@@ -494,7 +567,7 @@ void FixNVESpinSIB::solve_implicit_sib(double *s_in, double *F_vec, double *s_ou
   s_out[1] = 2.0 * My - sy;
   s_out[2] = 2.0 * Mz - sz;
 
-  // Renormalize for numerical stability
+  // Renormalize for numerical stability (sp[0:2] is always unit vector)
   double norm = sqrt(s_out[0]*s_out[0] + s_out[1]*s_out[1] + s_out[2]*s_out[2]);
   if (norm > 1e-10) {
     s_out[0] /= norm;

@@ -1,34 +1,26 @@
 #!/bin/bash
 
-# Install/unInstall package files in LAMMPS
-# mode = 0/1/2 for uninstall/install/update
+# Install/unInstall package files in LAMMPS src dir
+# Note: fix_nve_spin_sib and fix_langevin_spin_sib are now in USER-SPIN-ML package
 
-mode=$1
+if (test $1 = 1) then
 
-# enforce using portable C locale
-LC_ALL=C
-export LC_ALL
+  # Install: copy files to src directory
 
-# arg1 = file, arg2 = move file, arg3 = copy file
-action () {
-  if (test $mode = 0) then
-    rm -f ../$1
-  elif (! cmp -s $1 ../$1) then
-    if (test -z "$2" || test -e ../$2) then
-      cp $1 ..
-      if (test -n "$3") then
-        cp $1 ../$3
-      fi
-    fi
-  fi
-}
+  # Base files (always installed)
+  cp step_utils.cpp ..
+  cp step_utils.h ..
+  cp pair_spin_step.cpp ..
+  cp pair_spin_step.h ..
 
-# list of files
+elif (test $1 = 0) then
 
-action fix_nve_spin_sib.cpp
-action fix_nve_spin_sib.h
-action fix_langevin_spin_sib.cpp
-action fix_langevin_spin_sib.h
-action fix_glangevin_spin_sib.cpp
-action fix_glangevin_spin_sib.h
-action pair_spin_ml.h
+  # Uninstall: remove files from src directory
+
+  # Base files
+  rm -f ../step_utils.cpp
+  rm -f ../step_utils.h
+  rm -f ../pair_spin_step.cpp
+  rm -f ../pair_spin_step.h
+
+fi

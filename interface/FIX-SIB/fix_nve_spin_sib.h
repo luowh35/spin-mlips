@@ -56,6 +56,7 @@ namespace LAMMPS_NS {
 
 // Forward declarations
 class FixLangevinSpinSIB;
+class FixGLangevinSpinSIB;
 class FixPrecessionSpin;
 class PairSpinML;
 
@@ -86,6 +87,11 @@ class FixNVESpinSIB : public Fix {
   int maglangevin_sib_flag;
   FixLangevinSpinSIB **locklangevinspin_sib;
 
+  // Pointers to fix glangevin/spin/sib styles (generalized Langevin for variable-length spins)
+  int nglangspin_sib;
+  int magglangevin_sib_flag;
+  FixGLangevinSpinSIB **lockglangevinspin_sib;
+
   // Pointers to fix precession/spin styles
   int nprecspin;
   int precession_spin_flag;
@@ -93,7 +99,9 @@ class FixNVESpinSIB : public Fix {
 
   // Storage for SIB predictor-corrector method
   double **s_save;         // saved spin at start of half-step
-  double **noise_vec;      // stored noise vector (same for predictor and corrector)
+  double **noise_vec;      // stored transverse noise vector (same for predictor and corrector)
+  double *noise_L_vec;     // stored longitudinal noise (for glangevin)
+  double **fm_full;        // full (unprojected) magnetic forces for longitudinal dynamics
 
   // Helper functions
   void sib_spin_half_step();  // perform one SIB half-step update
