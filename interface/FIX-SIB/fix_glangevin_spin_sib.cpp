@@ -146,10 +146,10 @@ void FixGLangevinSpinSIB::init()
   sigma_T = sqrt(2.0 * D_T);
 
   // Calculate longitudinal noise strength
-  // Based on SPILADY: sigma_L = sqrt(2 * k_B * T * gamma_L / dt)
+  // Based on SPILADY: noise term per half-step is sqrt(2 * γ_L * k_B * T * dts) * ξ
   // gamma_L = 1/tau_L (in ps^-1)
-  D_L = gamma_L * kb * temp / dts;
-  sigma_L = sqrt(2.0 * D_L);
+  // Note: sigma_L here is the strength per half-step (not per full step)
+  sigma_L = sqrt(2.0 * gamma_L * kb * temp * dts);
 
   if (comm->me == 0) {
     utils::logmesg(lmp, "Fix glangevin/spin/sib: Variable-length spin thermostat\n");
@@ -302,9 +302,17 @@ void FixGLangevinSpinSIB::compute_single_langevin_reuse_noise(int i, double spi[
 
    Equation: d|S|/dt = γ_L * (H_eff · ŝ) + ξ_L
 
-   Discretized: |S|^{n+1} = |S|^n + dt * [γ_L * (H_eff · ŝ) + σ_L * ξ_L]
+   Using semi-implicit scheme for deterministic part:
+   |S|^{n+1} = |S|^n + dt * γ_L * H_parallel(|S|^n) + sqrt(dt) * σ_L * ξ_L
 
    where σ_L = sqrt(2 * γ_L * k_B * T / dt) satisfies FDT
+
+   The deterministic part uses the field computed at the current state.
+   The noise part is added explicitly (Wiener process must be explicit).
+
+   For stability under strong noise, apply bounds based on physical
+   relaxation: the maximum change per half-step is limited to prevent
+   unphysical excursions when noise dominates.
 ------------------------------------------------------------------------- */
 
 void FixGLangevinSpinSIB::compute_longitudinal_step(int i, double spi[3], double fmi[3],
@@ -327,6 +335,7 @@ void FixGLangevinSpinSIB::compute_longitudinal_step(int i, double spi[3], double
     s_hat[2] = spi[2] / spi_norm;
 
     // Calculate H_eff · ŝ (longitudinal component of effective field)
+    // H_parallel = fmi · ŝ = -dE/d|m| (in eV/μ_B)
     double H_parallel = fmi[0] * s_hat[0] + fmi[1] * s_hat[1] + fmi[2] * s_hat[2];
 
     // Generate longitudinal noise
@@ -337,12 +346,36 @@ void FixGLangevinSpinSIB::compute_longitudinal_step(int i, double spi[3], double
     }
 
     // Longitudinal noise strength for this timestep
-    // σ_L = sqrt(2 * γ_L * k_B * T / dt)
+    // Using semi-implicit scheme for deterministic part:
+    // d|m|/dt = γ_L * H_parallel * |m| + ξ_L
+    // Solution: |m|^{n+1} = |m|^n / (1 - γ_L * H_parallel * dt)
+    // This is unconditionally stable for H_parallel < 0 (restoring force)
     double kb = force->boltz;
-    double sigma_L_dt = sqrt(2.0 * gamma_L * kb * temp / dt_step);
+    double sp_mag_old = sp[i][3];
 
-    // Update spin magnitude: d|S|/dt = γ_L * H_parallel + σ_L * ξ_L
-    double d_sp_mag = dt_step * gamma_L * H_parallel + sqrt(dt_step) * sigma_L_dt * noise_L_out;
+    // Deterministic update (semi-implicit):
+    // |m|^{n+1} = |m|^n + dt * γ_L * H_parallel * |m|^{n+1}
+    // => |m|^{n+1} * (1 - dt * γ_L * H_parallel) = |m|^n
+    // => |m|^{n+1} = |m|^n / (1 - dt * γ_L * H_parallel)
+    // The correction is: d|m| = |m|^{n+1} - |m|^n
+    double denom = 1.0 - dt_step * gamma_L * H_parallel;
+    double sp_mag_new = sp_mag_old / denom;
+    double d_sp_deterministic = sp_mag_new - sp_mag_old;
+
+    // Noise update: follows fluctuation-dissipation theorem
+    // Noise scales with the current magnetic moment sp[3]
+    // d|m|_noise = sqrt(2 * γ_L * k_B * T * dt_step) * sp[3] * ξ
+    double sigma_L = sqrt(2.0 * gamma_L * kb * temp * dt_step) * sp_mag_old;
+    double d_sp_noise = sigma_L * noise_L_out;
+
+    // Total update
+    double d_sp_mag = d_sp_deterministic + d_sp_noise;
+
+    // Apply bounds to prevent unphysical excursions from noise
+    // Limit to 20% of current magnitude per half-step
+    double max_change = 0.20 * sp_mag_old;
+    if (d_sp_mag > max_change) d_sp_mag = max_change;
+    if (d_sp_mag < -max_change) d_sp_mag = -max_change;
 
     // Update sp[3] (spin magnitude)
     sp[i][3] += d_sp_mag;
@@ -376,11 +409,27 @@ void FixGLangevinSpinSIB::compute_longitudinal_step_reuse(int i, double spi[3], 
     double H_parallel = fmi[0] * s_hat[0] + fmi[1] * s_hat[1] + fmi[2] * s_hat[2];
 
     // Longitudinal noise strength for this timestep
+    // Same semi-implicit scheme as predictor step
     double kb = force->boltz;
-    double sigma_L_dt = sqrt(2.0 * gamma_L * kb * temp / dt_step);
+    double sp_mag_old = sp[i][3];
 
-    // Update spin magnitude using same noise as predictor
-    double d_sp_mag = dt_step * gamma_L * H_parallel + sqrt(dt_step) * sigma_L_dt * noise_L_in;
+    // Deterministic update (semi-implicit):
+    // Same formula as predictor step
+    double denom = 1.0 - dt_step * gamma_L * H_parallel;
+    double sp_mag_new = sp_mag_old / denom;
+    double d_sp_deterministic = sp_mag_new - sp_mag_old;
+
+    // Noise update: reuse same noise as predictor
+    double sigma_L = sqrt(2.0 * gamma_L * kb * temp * dt_step) * sp_mag_old;
+    double d_sp_noise = sigma_L * noise_L_in;
+
+    // Total update
+    double d_sp_mag = d_sp_deterministic + d_sp_noise;
+
+    // Apply bounds to prevent unphysical excursions from noise
+    double max_change = 0.20 * sp_mag_old;  // 20% per half-step
+    if (d_sp_mag > max_change) d_sp_mag = max_change;
+    if (d_sp_mag < -max_change) d_sp_mag = -max_change;
 
     // Update sp[3] (spin magnitude)
     sp[i][3] += d_sp_mag;

@@ -414,6 +414,7 @@ void FixNVESpinSIB::sib_spin_half_step()
     pair_spin_ml->distribute_full_mag_forces(fm_full, nlocal);
   }
 
+
   // Corrector step
   for (int i = 0; i < nlocal; i++) {
     if (mask[i] & groupbit) {
