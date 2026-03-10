@@ -56,9 +56,6 @@ class FixLangevinSpinSIB : public Fix {
   void init() override;
   void setup(int) override;
 
-  // Standard Langevin computation (for compatibility)
-  void compute_single_langevin(int, double *, double *);
-
   // SIB-specific: generate noise and store it
   void compute_single_langevin_store_noise(int, double *, double *, double *);
 

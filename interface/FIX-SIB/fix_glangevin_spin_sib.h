@@ -48,7 +48,6 @@ FixStyle(glangevin/spin/sib,FixGLangevinSpinSIB);
 #define LMP_FIX_GLANGEVIN_SPIN_SIB_H
 
 #include "fix.h"
-#include "atom.h"
 
 namespace LAMMPS_NS {
 
@@ -68,14 +67,14 @@ class FixGLangevinSpinSIB : public Fix {
   // SIB-specific: reuse stored noise (for corrector step)
   void compute_single_langevin_reuse_noise(int, double *, double *, double *);
 
-  // Longitudinal dynamics: update spin magnitude sp[3]
-  // Called separately after transverse SIB integration
-  void compute_longitudinal_step(int i, double *spi, double *fmi, double &noise_L_out, double dt_step);
-  void compute_longitudinal_step_reuse(int i, double *spi, double *fmi, double noise_L_in, double dt_step);
+  // Longitudinal predictor: Euler step in log-space, returns H_parallel for averaging
+  void compute_longitudinal_predictor(int i, double *spi, double *fmi,
+                                       double &H_par_out, double dt_step);
 
-  double get_gamma_L() const { return gamma_L; }
-  double get_sigma_L() const { return sigma_L; }
-  bool in_group(int i) const { return (atom->mask[i] & groupbit); }
+  // Longitudinal corrector: Heun/trapezoidal step from mag_save, adds noise
+  void compute_longitudinal_corrector(int i, double *spi, double *fmi,
+                                       double H_par_pred, double mag_save,
+                                       double &noise_L_out, double dt_step);
 
  protected:
   // Transverse (Gilbert) damping parameters
@@ -88,7 +87,7 @@ class FixGLangevinSpinSIB : public Fix {
   // Longitudinal damping parameters
   double tau_L;         // longitudinal relaxation time (ps)
   double gamma_L;       // longitudinal damping coefficient = 1/tau_L (ps^-1)
-  double D_L, sigma_L;  // longitudinal bath intensity variables
+  double sigma_L;       // longitudinal noise strength per half-step
 
   class RanMars *random;
   int seed;
@@ -97,10 +96,6 @@ class FixGLangevinSpinSIB : public Fix {
   void add_tdamping(double *, double *);
   void add_noise(double *, double *);
   void apply_gil_factor(double *);
-
-  // Helper functions for longitudinal components
-  void add_longitudinal_damping(double *, double *, double);
-  void add_longitudinal_noise(double *, double *, double);
 };
 
 }    // namespace LAMMPS_NS

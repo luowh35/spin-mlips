@@ -200,51 +200,6 @@ void FixGLangevinSpinSIB::apply_gil_factor(double fmi[3])
   fmi[2] *= gil_factor;
 }
 
-/* ---------------------------------------------------------------------- */
-
-void FixGLangevinSpinSIB::add_longitudinal_damping(double spi[3], double fmi[3], double sp_mag)
-{
-  // Longitudinal damping: adds γ_L * (H_eff · ŝ) * ŝ to the effective field
-  if (sp_mag < 1e-10) return;
-
-  double spi_norm = sqrt(spi[0]*spi[0] + spi[1]*spi[1] + spi[2]*spi[2]);
-  if (spi_norm < 1e-10) return;
-
-  // Calculate ŝ (unit vector along spin direction)
-  double s_hat[3];
-  s_hat[0] = spi[0] / spi_norm;
-  s_hat[1] = spi[1] / spi_norm;
-  s_hat[2] = spi[2] / spi_norm;
-
-  // Calculate H_eff · ŝ (longitudinal component of effective field)
-  double H_parallel = fmi[0] * s_hat[0] + fmi[1] * s_hat[1] + fmi[2] * s_hat[2];
-
-  // Add longitudinal damping term: γ_L * H_parallel * ŝ
-  fmi[0] += gamma_L * H_parallel * s_hat[0];
-  fmi[1] += gamma_L * H_parallel * s_hat[1];
-  fmi[2] += gamma_L * H_parallel * s_hat[2];
-}
-
-/* ---------------------------------------------------------------------- */
-
-void FixGLangevinSpinSIB::add_longitudinal_noise(double spi[3], double fmi[3], double noise_L)
-{
-  // Add longitudinal stochastic field: σ_L * ξ_L * ŝ
-  double spi_norm = sqrt(spi[0]*spi[0] + spi[1]*spi[1] + spi[2]*spi[2]);
-  if (spi_norm < 1e-10) return;
-
-  // Calculate ŝ (unit vector along spin direction)
-  double s_hat[3];
-  s_hat[0] = spi[0] / spi_norm;
-  s_hat[1] = spi[1] / spi_norm;
-  s_hat[2] = spi[2] / spi_norm;
-
-  // Add longitudinal noise: σ_L * ξ_L * ŝ
-  fmi[0] += sigma_L * noise_L * s_hat[0];
-  fmi[1] += sigma_L * noise_L * s_hat[1];
-  fmi[2] += sigma_L * noise_L * s_hat[2];
-}
-
 /* ----------------------------------------------------------------------
    SIB predictor step: generate noise and store it (transverse only)
    Same as langevin/spin/sib for direction dynamics
@@ -270,8 +225,8 @@ void FixGLangevinSpinSIB::compute_single_langevin_store_noise(int i, double spi[
     // Step 2: Add transverse damping using noisy field
     if (tdamp_flag) add_tdamping(spi, fmi);
 
-    // Step 3: Apply Gilbert factor for transverse components
-    if (temp_flag) apply_gil_factor(fmi);
+    // Step 3: Apply Gilbert factor 1/(1+α²) whenever damping is present
+    if (tdamp_flag) apply_gil_factor(fmi);
   }
 }
 
@@ -292,111 +247,34 @@ void FixGLangevinSpinSIB::compute_single_langevin_reuse_noise(int i, double spi[
     // Step 2: Add transverse damping
     if (tdamp_flag) add_tdamping(spi, fmi);
 
-    // Step 3: Apply Gilbert factor for transverse components
-    if (temp_flag) apply_gil_factor(fmi);
+    // Step 3: Apply Gilbert factor 1/(1+α²) whenever damping is present
+    if (tdamp_flag) apply_gil_factor(fmi);
   }
 }
 
 /* ----------------------------------------------------------------------
-   Longitudinal dynamics: update spin magnitude sp[3]
+   Longitudinal predictor (Heun method, first stage).
 
-   Equation: d|S|/dt = γ_L * (H_eff · ŝ) + ξ_L
+   Computes H_∥ = (fm_full · ŝ) + H_entropy at the current state,
+   then performs a full Euler step in log-space:
+     u_pred = u^n + γ_L * H_∥ * dt_step
+     sp[i][3] = exp(u_pred)
 
-   Using semi-implicit scheme for deterministic part:
-   |S|^{n+1} = |S|^n + dt * γ_L * H_parallel(|S|^n) + sqrt(dt) * σ_L * ξ_L
-
-   where σ_L = sqrt(2 * γ_L * k_B * T / dt) satisfies FDT
-
-   The deterministic part uses the field computed at the current state.
-   The noise part is added explicitly (Wiener process must be explicit).
-
-   For stability under strong noise, apply bounds based on physical
-   relaxation: the maximum change per half-step is limited to prevent
-   unphysical excursions when noise dominates.
+   Returns H_∥ via H_par_out so the corrector can form the trapezoidal
+   average (H_∥_1 + H_∥_2)/2.
 ------------------------------------------------------------------------- */
 
-void FixGLangevinSpinSIB::compute_longitudinal_step(int i, double spi[3], double fmi[3],
-                                                    double &noise_L_out, double dt_step)
+void FixGLangevinSpinSIB::compute_longitudinal_predictor(int i, double spi[3],
+                                                          double fmi[3],
+                                                          double &H_par_out,
+                                                          double dt_step)
 {
   int *mask = atom->mask;
   double **sp = atom->sp;
 
-  if (mask[i] & groupbit) {
-    // Calculate ŝ (unit vector along spin direction)
-    double spi_norm = sqrt(spi[0]*spi[0] + spi[1]*spi[1] + spi[2]*spi[2]);
-    if (spi_norm < 1e-10) {
-      noise_L_out = 0.0;
-      return;
-    }
-
-    double s_hat[3];
-    s_hat[0] = spi[0] / spi_norm;
-    s_hat[1] = spi[1] / spi_norm;
-    s_hat[2] = spi[2] / spi_norm;
-
-    // Calculate H_eff · ŝ (longitudinal component of effective field)
-    // H_parallel = fmi · ŝ = -dE/d|m| (in eV/μ_B)
-    double H_parallel = fmi[0] * s_hat[0] + fmi[1] * s_hat[1] + fmi[2] * s_hat[2];
-
-    // Generate longitudinal noise
-    if (temp_flag) {
-      noise_L_out = random->gaussian();
-    } else {
-      noise_L_out = 0.0;
-    }
-
-    // Longitudinal noise strength for this timestep
-    // Using semi-implicit scheme for deterministic part:
-    // d|m|/dt = γ_L * H_parallel * |m| + ξ_L
-    // Solution: |m|^{n+1} = |m|^n / (1 - γ_L * H_parallel * dt)
-    // This is unconditionally stable for H_parallel < 0 (restoring force)
-    double kb = force->boltz;
-    double sp_mag_old = sp[i][3];
-
-    // Deterministic update (semi-implicit):
-    // |m|^{n+1} = |m|^n + dt * γ_L * H_parallel * |m|^{n+1}
-    // => |m|^{n+1} * (1 - dt * γ_L * H_parallel) = |m|^n
-    // => |m|^{n+1} = |m|^n / (1 - dt * γ_L * H_parallel)
-    // The correction is: d|m| = |m|^{n+1} - |m|^n
-    double denom = 1.0 - dt_step * gamma_L * H_parallel;
-    double sp_mag_new = sp_mag_old / denom;
-    double d_sp_deterministic = sp_mag_new - sp_mag_old;
-
-    // Noise update: follows fluctuation-dissipation theorem
-    // Noise scales with the current magnetic moment sp[3]
-    // d|m|_noise = sqrt(2 * γ_L * k_B * T * dt_step) * sp[3] * ξ
-    double sigma_L = sqrt(2.0 * gamma_L * kb * temp * dt_step) * sp_mag_old;
-    double d_sp_noise = sigma_L * noise_L_out;
-
-    // Total update
-    double d_sp_mag = d_sp_deterministic + d_sp_noise;
-
-    // Apply bounds to prevent unphysical excursions from noise
-    // Limit to 20% of current magnitude per half-step
-    double max_change = 0.20 * sp_mag_old;
-    if (d_sp_mag > max_change) d_sp_mag = max_change;
-    if (d_sp_mag < -max_change) d_sp_mag = -max_change;
-
-    // Update sp[3] (spin magnitude)
-    sp[i][3] += d_sp_mag;
-
-    // Ensure spin magnitude stays positive
-    if (sp[i][3] < 0.01) sp[i][3] = 0.01;
-  }
-}
-
-/* ----------------------------------------------------------------------
-   Longitudinal dynamics corrector: reuse stored noise
-------------------------------------------------------------------------- */
-
-void FixGLangevinSpinSIB::compute_longitudinal_step_reuse(int i, double spi[3], double fmi[3],
-                                                          double noise_L_in, double dt_step)
-{
-  int *mask = atom->mask;
-  double **sp = atom->sp;
+  H_par_out = 0.0;
 
   if (mask[i] & groupbit) {
-    // Calculate ŝ (unit vector along spin direction)
     double spi_norm = sqrt(spi[0]*spi[0] + spi[1]*spi[1] + spi[2]*spi[2]);
     if (spi_norm < 1e-10) return;
 
@@ -405,36 +283,81 @@ void FixGLangevinSpinSIB::compute_longitudinal_step_reuse(int i, double spi[3], 
     s_hat[1] = spi[1] / spi_norm;
     s_hat[2] = spi[2] / spi_norm;
 
-    // Calculate H_eff · ŝ (longitudinal component of effective field)
     double H_parallel = fmi[0] * s_hat[0] + fmi[1] * s_hat[1] + fmi[2] * s_hat[2];
 
-    // Longitudinal noise strength for this timestep
-    // Same semi-implicit scheme as predictor step
-    double kb = force->boltz;
-    double sp_mag_old = sp[i][3];
+    double sp_mag = sp[i][3];
 
-    // Deterministic update (semi-implicit):
-    // Same formula as predictor step
-    double denom = 1.0 - dt_step * gamma_L * H_parallel;
-    double sp_mag_new = sp_mag_old / denom;
-    double d_sp_deterministic = sp_mag_new - sp_mag_old;
+    static constexpr double SP_MAG_FLOOR = 1.0e-10;
+    if (sp_mag <= SP_MAG_FLOOR) {
+      sp_mag = SP_MAG_FLOOR;
+      sp[i][3] = SP_MAG_FLOOR;
+    }
 
-    // Noise update: reuse same noise as predictor
-    double sigma_L = sqrt(2.0 * gamma_L * kb * temp * dt_step) * sp_mag_old;
-    double d_sp_noise = sigma_L * noise_L_in;
+    H_par_out = H_parallel;
 
-    // Total update
-    double d_sp_mag = d_sp_deterministic + d_sp_noise;
+    double u_old = log(sp_mag);
+    double u_pred = u_old + gamma_L * H_parallel * dt_step;
 
-    // Apply bounds to prevent unphysical excursions from noise
-    double max_change = 0.20 * sp_mag_old;  // 20% per half-step
-    if (d_sp_mag > max_change) d_sp_mag = max_change;
-    if (d_sp_mag < -max_change) d_sp_mag = -max_change;
+    sp[i][3] = exp(u_pred);
+  }
+}
 
-    // Update sp[3] (spin magnitude)
-    sp[i][3] += d_sp_mag;
+/* ----------------------------------------------------------------------
+   Longitudinal corrector (Heun method, second stage).
 
-    // Ensure spin magnitude stays positive
-    if (sp[i][3] < 0.01) sp[i][3] = 0.01;
+   Computes H_∥_2 at the predicted state (s_mid, |m|_pred), then
+   applies the trapezoidal rule starting from the saved magnitude:
+     u_new = ln(mag_save) + γ_L * (H_∥_1 + H_∥_2)/2 * dt_step + σ_L * ξ
+     sp[i][3] = exp(u_new)
+
+   This gives second-order accuracy for the deterministic drift.
+   The noise ξ is a single Wiener increment for the full half-step dts.
+------------------------------------------------------------------------- */
+
+void FixGLangevinSpinSIB::compute_longitudinal_corrector(int i, double spi[3],
+                                                          double fmi[3],
+                                                          double H_par_pred,
+                                                          double mag_save,
+                                                          double &noise_L_out,
+                                                          double dt_step)
+{
+  int *mask = atom->mask;
+  double **sp = atom->sp;
+
+  if (mask[i] & groupbit) {
+    double spi_norm = sqrt(spi[0]*spi[0] + spi[1]*spi[1] + spi[2]*spi[2]);
+    if (spi_norm < 1e-10) {
+      noise_L_out = 0.0;
+      sp[i][3] = mag_save;
+      return;
+    }
+
+    double s_hat[3];
+    s_hat[0] = spi[0] / spi_norm;
+    s_hat[1] = spi[1] / spi_norm;
+    s_hat[2] = spi[2] / spi_norm;
+
+    // H_∥_2 evaluated at predicted state (|m|_pred is current sp[i][3])
+    double H_parallel_2 = fmi[0] * s_hat[0] + fmi[1] * s_hat[1] + fmi[2] * s_hat[2];
+
+    static constexpr double SP_MAG_FLOOR = 1.0e-10;
+
+    // Generate longitudinal noise
+    if (temp_flag) {
+      noise_L_out = random->gaussian();
+    } else {
+      noise_L_out = 0.0;
+    }
+
+    // Heun corrector: trapezoidal average of drift, starting from saved magnitude
+    double mag_save_clamped = mag_save;
+    if (mag_save_clamped <= SP_MAG_FLOOR) mag_save_clamped = SP_MAG_FLOOR;
+
+    double u_old = log(mag_save_clamped);
+    double du_det = gamma_L * 0.5 * (H_par_pred + H_parallel_2) * dt_step;
+    double du_noise = sigma_L * noise_L_out;
+    double u_new = u_old + du_det + du_noise;
+
+    sp[i][3] = exp(u_new);
   }
 }

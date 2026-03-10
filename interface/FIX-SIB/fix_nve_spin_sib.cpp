@@ -25,11 +25,13 @@
 #include "error.h"
 #include "fix_langevin_spin_sib.h"
 #include "fix_glangevin_spin_sib.h"
+#include "fix_landau_spin.h"
 #include "fix_precession_spin.h"
 #include "force.h"
 #include "memory.h"
 #include "modify.h"
 #include "pair_spin_ml.h"
+#include "pair_spin.h"
 #include "update.h"
 
 #include <cmath>
@@ -66,9 +68,12 @@ static const char cite_fix_nve_spin_sib[] =
 
 FixNVESpinSIB::FixNVESpinSIB(LAMMPS *lmp, int narg, char **arg) :
   Fix(lmp, narg, arg),
-  pair_spin_ml(nullptr), locklangevinspin_sib(nullptr),
+  pair_spin_ml(nullptr), npairspin(0), spin_pairs(nullptr),
+  locklangevinspin_sib(nullptr),
   lockglangevinspin_sib(nullptr),
-  lockprecessionspin(nullptr), s_save(nullptr), noise_vec(nullptr),
+  lockprecessionspin(nullptr), nlandauspin(0), locklandauspin(nullptr),
+  s_save(nullptr), mag_save(nullptr),
+  H_par_save(nullptr), noise_vec(nullptr),
   noise_L_vec(nullptr), fm_full(nullptr)
 {
   if (lmp->citeme) lmp->citeme->add(cite_fix_nve_spin_sib);
@@ -78,12 +83,7 @@ FixNVESpinSIB::FixNVESpinSIB(LAMMPS *lmp, int narg, char **arg) :
   time_integrate = 1;
   lattice_flag = 1;
   nlocal_max = 0;
-
-  // Initialize flags
-  nprecspin = nlangspin_sib = nglangspin_sib = 0;
-  precession_spin_flag = 0;
-  maglangevin_sib_flag = 0;
-  magglangevin_sib_flag = 0;
+  nprecspin = 0;
 
   // Check if atom map is defined
   if (atom->map_style == Atom::MAP_NONE)
@@ -117,12 +117,14 @@ FixNVESpinSIB::FixNVESpinSIB(LAMMPS *lmp, int narg, char **arg) :
 FixNVESpinSIB::~FixNVESpinSIB()
 {
   memory->destroy(s_save);
+  memory->destroy(mag_save);
+  memory->destroy(H_par_save);
   memory->destroy(noise_vec);
   memory->destroy(noise_L_vec);
   memory->destroy(fm_full);
-  delete[] locklangevinspin_sib;
-  delete[] lockglangevinspin_sib;
   delete[] lockprecessionspin;
+  delete[] locklandauspin;
+  delete[] spin_pairs;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -151,10 +153,38 @@ void FixNVESpinSIB::init()
   // If not found, try spin/nep
   if (!pair_spin_ml)
     pair_spin_ml = dynamic_cast<PairSpinML *>(force->pair_match("spin/nep", 0, 0));
-  if (!pair_spin_ml)
-    error->all(FLERR, "Fix nve/spin/sib requires pair_style spin/step or spin/nep");
 
-  // Find fix precession/spin styles
+  // Find standard PairSpin styles (e.g. spin/exchange, spin/dmi, ...)
+  // Exclude PairSpinML derivatives to avoid double-counting
+  delete[] spin_pairs;
+  spin_pairs = nullptr;
+  npairspin = 0;
+
+  // Count standard PairSpin styles
+  for (int i = 1; force->pair_match("^spin", 0, i); i++) {
+    Pair *p = force->pair_match("^spin", 0, i);
+    if (dynamic_cast<PairSpinML *>(p) == nullptr)
+      npairspin++;
+  }
+
+  // Fill pointer array
+  if (npairspin > 0) {
+    spin_pairs = new PairSpin*[npairspin];
+    int count = 0;
+    for (int i = 1; force->pair_match("^spin", 0, i); i++) {
+      Pair *p = force->pair_match("^spin", 0, i);
+      if (dynamic_cast<PairSpinML *>(p) == nullptr) {
+        spin_pairs[count++] = dynamic_cast<PairSpin *>(p);
+      }
+    }
+  }
+
+  // Require at least one spin pair style
+  if (!pair_spin_ml && npairspin == 0)
+    error->all(FLERR, "Fix nve/spin/sib requires at least one spin pair style "
+               "(PairSpinML or standard PairSpin)");
+
+  // Find fix precession/spin styles (multiple allowed)
   int iforce;
   nprecspin = 0;
   for (iforce = 0; iforce < modify->nfix; iforce++) {
@@ -170,52 +200,54 @@ void FixNVESpinSIB::init()
     int count = 0;
     for (iforce = 0; iforce < modify->nfix; iforce++) {
       if (utils::strmatch(modify->fix[iforce]->style, "^precession/spin")) {
-        precession_spin_flag = 1;
         lockprecessionspin[count] = dynamic_cast<FixPrecessionSpin *>(modify->fix[iforce]);
         count++;
       }
     }
   }
 
-  // Find fix langevin/spin/sib styles
-  nlangspin_sib = 0;
-  for (iforce = 0; iforce < modify->nfix; iforce++) {
-    if (strcmp(modify->fix[iforce]->style, "langevin/spin/sib") == 0) {
-      nlangspin_sib++;
-    }
-  }
-
-  if (nlangspin_sib > 0) {
-    delete[] locklangevinspin_sib;
-    locklangevinspin_sib = new FixLangevinSpinSIB *[nlangspin_sib];
-
+  // Find fix langevin/spin/sib (at most one allowed)
+  locklangevinspin_sib = nullptr;
+  {
     int count = 0;
     for (iforce = 0; iforce < modify->nfix; iforce++) {
       if (strcmp(modify->fix[iforce]->style, "langevin/spin/sib") == 0) {
-        maglangevin_sib_flag = 1;
-        locklangevinspin_sib[count] = dynamic_cast<FixLangevinSpinSIB *>(modify->fix[iforce]);
+        if (count > 0)
+          error->all(FLERR, "Only one fix langevin/spin/sib is allowed");
+        locklangevinspin_sib = dynamic_cast<FixLangevinSpinSIB *>(modify->fix[iforce]);
         count++;
       }
     }
   }
 
-  // Find fix glangevin/spin/sib styles (generalized Langevin for variable-length spins)
-  nglangspin_sib = 0;
-  for (iforce = 0; iforce < modify->nfix; iforce++) {
-    if (strcmp(modify->fix[iforce]->style, "glangevin/spin/sib") == 0) {
-      nglangspin_sib++;
-    }
-  }
-
-  if (nglangspin_sib > 0) {
-    delete[] lockglangevinspin_sib;
-    lockglangevinspin_sib = new FixGLangevinSpinSIB *[nglangspin_sib];
-
+  // Find fix glangevin/spin/sib (at most one allowed)
+  lockglangevinspin_sib = nullptr;
+  {
     int count = 0;
     for (iforce = 0; iforce < modify->nfix; iforce++) {
       if (strcmp(modify->fix[iforce]->style, "glangevin/spin/sib") == 0) {
-        magglangevin_sib_flag = 1;
-        lockglangevinspin_sib[count] = dynamic_cast<FixGLangevinSpinSIB *>(modify->fix[iforce]);
+        if (count > 0)
+          error->all(FLERR, "Only one fix glangevin/spin/sib is allowed");
+        lockglangevinspin_sib = dynamic_cast<FixGLangevinSpinSIB *>(modify->fix[iforce]);
+        count++;
+      }
+    }
+  }
+
+  // Find fix landau/spin styles (multiple allowed, one per group)
+  delete[] locklandauspin;
+  locklandauspin = nullptr;
+  nlandauspin = 0;
+  for (iforce = 0; iforce < modify->nfix; iforce++) {
+    if (strcmp(modify->fix[iforce]->style, "landau/spin") == 0)
+      nlandauspin++;
+  }
+  if (nlandauspin > 0) {
+    locklandauspin = new FixLandauSpin *[nlandauspin];
+    int count = 0;
+    for (iforce = 0; iforce < modify->nfix; iforce++) {
+      if (strcmp(modify->fix[iforce]->style, "landau/spin") == 0) {
+        locklandauspin[count] = dynamic_cast<FixLandauSpin *>(modify->fix[iforce]);
         count++;
       }
     }
@@ -227,15 +259,19 @@ void FixNVESpinSIB::init()
 
   if (comm->me == 0) {
     utils::logmesg(lmp, "Fix nve/spin/sib: SIB method with spin-lattice coupling\n");
-    utils::logmesg(lmp, "Fix nve/spin/sib: Using PairSpinML base class interface\n");
     utils::logmesg(lmp, "Fix nve/spin/sib: dts = dt/2 = {} for half-step updates\n", dts);
-    utils::logmesg(lmp, "Fix nve/spin/sib: 4 NN calls per timestep (2 per half-step)\n");
+    if (pair_spin_ml)
+      utils::logmesg(lmp, "Fix nve/spin/sib: PairSpinML detected (spin/step or spin/nep)\n");
+    if (npairspin > 0)
+      utils::logmesg(lmp, "Fix nve/spin/sib: {} standard PairSpin style(s) detected\n", npairspin);
     if (lattice_flag)
       utils::logmesg(lmp, "Fix nve/spin/sib: Lattice dynamics enabled (spin-lattice coupling)\n");
     else
       utils::logmesg(lmp, "Fix nve/spin/sib: Lattice frozen (pure spin dynamics)\n");
-    if (magglangevin_sib_flag)
+    if (lockglangevinspin_sib)
       utils::logmesg(lmp, "Fix nve/spin/sib: Variable-length spin mode (glangevin/spin/sib detected)\n");
+    if (nlandauspin > 0)
+      utils::logmesg(lmp, "Fix nve/spin/sib: {} fix landau/spin style(s) detected\n", nlandauspin);
   }
 }
 
@@ -244,7 +280,7 @@ void FixNVESpinSIB::init()
 void FixNVESpinSIB::setup(int vflag)
 {
   // Initial force computation
-  pair_spin_ml->compute(1, 1);
+  if (pair_spin_ml) pair_spin_ml->compute(1, 1);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -255,6 +291,8 @@ void FixNVESpinSIB::grow_arrays()
     nlocal_max = atom->nlocal + 100;
   }
   memory->grow(s_save, nlocal_max, 3, "fix_nve_spin_sib:s_save");
+  memory->grow(mag_save, nlocal_max, "fix_nve_spin_sib:mag_save");
+  memory->grow(H_par_save, nlocal_max, "fix_nve_spin_sib:H_par_save");
   memory->grow(noise_vec, nlocal_max, 3, "fix_nve_spin_sib:noise_vec");
   memory->grow(noise_L_vec, nlocal_max, "fix_nve_spin_sib:noise_L_vec");
   memory->grow(fm_full, nlocal_max, 3, "fix_nve_spin_sib:fm_full");
@@ -332,6 +370,10 @@ void FixNVESpinSIB::sib_spin_half_step()
       s_save[i][1] = sp[i][1];
       s_save[i][2] = sp[i][2];
 
+      // Save spin magnitude for longitudinal corrector (Heun resets from here)
+      mag_save[i] = sp[i][3];
+      H_par_save[i] = 0.0;
+
       // Initialize noise (will be filled by Langevin fix)
       noise_vec[i][0] = 0.0;
       noise_vec[i][1] = 0.0;
@@ -340,16 +382,40 @@ void FixNVESpinSIB::sib_spin_half_step()
     }
   }
 
-  // --- Step B: Compute omega(s_current) - NN call #1 ---
+  // --- Step B: Compute omega(s_current) - force evaluation #1 at (s^n, |m|^n) ---
   comm->forward_comm();
-  pair_spin_ml->recompute_forces();
+  if (pair_spin_ml) pair_spin_ml->recompute_forces();
 
-  // Distribute magnetic forces from cached tensor to fm array
+  // Distribute magnetic forces to fm array
   distribute_magnetic_forces();
+
+  // Distribute full (unprojected) magnetic forces for longitudinal dynamics
+  if (lockglangevinspin_sib) {
+    // Clear fm_full first
+    for (int i = 0; i < nlocal; i++)
+      fm_full[i][0] = fm_full[i][1] = fm_full[i][2] = 0.0;
+    // Only ML contributes to fm_full (standard PairSpin energy is direction-only)
+    if (pair_spin_ml)
+      pair_spin_ml->distribute_full_mag_forces(fm_full, nlocal);
+    // Landau on-site longitudinal force
+    for (int k = 0; k < nlandauspin; k++)
+      for (int i = 0; i < nlocal; i++)
+        if (mask[i] & groupbit)
+          locklandauspin[k]->compute_single_landau(i, sp[i][3], fm_full[i]);
+  }
 
   // Predictor step
   for (int i = 0; i < nlocal; i++) {
     if (mask[i] & groupbit) {
+
+      // Longitudinal predictor: Euler step, sp[i][3] → |m|_pred
+      // Stores H_∥_1 in H_par_save for Heun averaging
+      if (lockglangevinspin_sib) {
+        double spi_L[3] = {sp[i][0], sp[i][1], sp[i][2]};
+        lockglangevinspin_sib->compute_longitudinal_predictor(
+            i, spi_L, fm_full[i], H_par_save[i], dts);
+      }
+
       double spi[3], fmi[3];
       spi[0] = sp[i][0];
       spi[1] = sp[i][1];
@@ -359,25 +425,19 @@ void FixNVESpinSIB::sib_spin_half_step()
       fmi[2] = fm[i][2];
 
       // Add precession contributions
-      if (precession_spin_flag) {
+      if (nprecspin > 0) {
         for (int k = 0; k < nprecspin; k++) {
           lockprecessionspin[k]->compute_single_precession(i, spi, fmi);
         }
       }
 
       // Add Langevin contributions and store noise
-      if (maglangevin_sib_flag) {
-        for (int k = 0; k < nlangspin_sib; k++) {
-          locklangevinspin_sib[k]->compute_single_langevin_store_noise(i, spi, fmi, noise_vec[i]);
-        }
-      }
+      if (locklangevinspin_sib)
+        locklangevinspin_sib->compute_single_langevin_store_noise(i, spi, fmi, noise_vec[i]);
 
       // Add generalized Langevin transverse contributions and store noise
-      if (magglangevin_sib_flag) {
-        for (int k = 0; k < nglangspin_sib; k++) {
-          lockglangevinspin_sib[k]->compute_single_langevin_store_noise(i, spi, fmi, noise_vec[i]);
-        }
-      }
+      if (lockglangevinspin_sib)
+        lockglangevinspin_sib->compute_single_langevin_store_noise(i, spi, fmi, noise_vec[i]);
 
       double F_pred[3];
       F_pred[0] = fmi[0] * dts;
@@ -399,21 +459,29 @@ void FixNVESpinSIB::sib_spin_half_step()
       sp[i][0] = s_mid[0];
       sp[i][1] = s_mid[1];
       sp[i][2] = s_mid[2];
+      // sp[i][3] is now |m|_pred (set by longitudinal predictor above)
     }
   }
 
-  // --- Step C: Compute omega(s_mid) - NN call #2 ---
+  // --- Step C: Compute omega(s_mid, |m|_pred) - force evaluation #2 ---
   comm->forward_comm();
-  pair_spin_ml->recompute_forces();
+  if (pair_spin_ml) pair_spin_ml->recompute_forces();
 
-  // Distribute magnetic forces from cached tensor to fm array
+  // Distribute magnetic forces to fm array
   distribute_magnetic_forces();
 
   // Distribute full (unprojected) magnetic forces for longitudinal dynamics
-  if (magglangevin_sib_flag) {
-    pair_spin_ml->distribute_full_mag_forces(fm_full, nlocal);
+  if (lockglangevinspin_sib) {
+    for (int i = 0; i < nlocal; i++)
+      fm_full[i][0] = fm_full[i][1] = fm_full[i][2] = 0.0;
+    if (pair_spin_ml)
+      pair_spin_ml->distribute_full_mag_forces(fm_full, nlocal);
+    // Landau on-site longitudinal force
+    for (int k = 0; k < nlandauspin; k++)
+      for (int i = 0; i < nlocal; i++)
+        if (mask[i] & groupbit)
+          locklandauspin[k]->compute_single_landau(i, sp[i][3], fm_full[i]);
   }
-
 
   // Corrector step
   for (int i = 0; i < nlocal; i++) {
@@ -427,34 +495,19 @@ void FixNVESpinSIB::sib_spin_half_step()
       fmi[2] = fm[i][2];
 
       // Add precession contributions at midpoint
-      if (precession_spin_flag) {
+      if (nprecspin > 0) {
         for (int k = 0; k < nprecspin; k++) {
           lockprecessionspin[k]->compute_single_precession(i, spi, fmi);
         }
       }
 
-      // Save raw energy gradient for longitudinal dynamics.
-      // fm_full contains -dE/dm in eV/μ_B (raw gradient, no mag/hbar conversion).
-      // Precession is NOT added here because it's in rad/ps units (incompatible),
-      // and precession (s × H) is purely transverse anyway.
-      double fmi_det[3];
-      fmi_det[0] = fm_full[i][0];
-      fmi_det[1] = fm_full[i][1];
-      fmi_det[2] = fm_full[i][2];
-
       // Add Langevin contributions using SAME noise as predictor step
-      if (maglangevin_sib_flag) {
-        for (int k = 0; k < nlangspin_sib; k++) {
-          locklangevinspin_sib[k]->compute_single_langevin_reuse_noise(i, spi, fmi, noise_vec[i]);
-        }
-      }
+      if (locklangevinspin_sib)
+        locklangevinspin_sib->compute_single_langevin_reuse_noise(i, spi, fmi, noise_vec[i]);
 
-      // Add generalized Langevin transverse contributions using SAME noise as predictor step
-      if (magglangevin_sib_flag) {
-        for (int k = 0; k < nglangspin_sib; k++) {
-          lockglangevinspin_sib[k]->compute_single_langevin_reuse_noise(i, spi, fmi, noise_vec[i]);
-        }
-      }
+      // Add generalized Langevin transverse contributions using SAME noise
+      if (lockglangevinspin_sib)
+        lockglangevinspin_sib->compute_single_langevin_reuse_noise(i, spi, fmi, noise_vec[i]);
 
       double F_corr[3];
       F_corr[0] = fmi[0] * dts;
@@ -470,19 +523,18 @@ void FixNVESpinSIB::sib_spin_half_step()
       fm[i][1] = fmi[1];
       fm[i][2] = fmi[2];
 
-      // Update spin to new value
+      // Update spin direction to new value
       sp[i][0] = s_new[0];
       sp[i][1] = s_new[1];
       sp[i][2] = s_new[2];
 
-      // Longitudinal dynamics: update spin magnitude sp[3]
-      // Uses the FULL deterministic field (including longitudinal component
-      // dE/d|m|) without transverse stochastic noise, matching SPILADY's
-      // Parts 2&4: ds += gamma_HL * dt * (Heff_H + Heff_L).
-      if (magglangevin_sib_flag) {
-        for (int k = 0; k < nglangspin_sib; k++) {
-          lockglangevinspin_sib[k]->compute_longitudinal_step(i, s_new, fmi_det, noise_L_vec[i], dts);
-        }
+      // Longitudinal corrector: Heun trapezoidal step + noise
+      // Uses H_par_save (from predictor) and fm_full (from NN#2)
+      // Resets from mag_save to apply the averaged drift
+      if (lockglangevinspin_sib) {
+        lockglangevinspin_sib->compute_longitudinal_corrector(
+            i, s_new, fm_full[i], H_par_save[i], mag_save[i],
+            noise_L_vec[i], dts);
       }
     }
   }
@@ -596,6 +648,13 @@ void FixNVESpinSIB::distribute_magnetic_forces()
     }
   }
 
-  // Distribute cached magnetic forces from pair_spin_ml
-  pair_spin_ml->distribute_cached_mag_forces();
+  // ML forces (from cached NN output)
+  if (pair_spin_ml)
+    pair_spin_ml->distribute_cached_mag_forces();
+
+  // Standard PairSpin forces (per-atom accumulation)
+  for (int k = 0; k < npairspin; k++)
+    for (int i = 0; i < nlocal; i++)
+      if (mask[i] & groupbit)
+        spin_pairs[k]->compute_single_pair(i, fm[i]);
 }

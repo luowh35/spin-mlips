@@ -58,7 +58,9 @@ namespace LAMMPS_NS {
 class FixLangevinSpinSIB;
 class FixGLangevinSpinSIB;
 class FixPrecessionSpin;
+class FixLandauSpin;
 class PairSpinML;
+class PairSpin;
 
 class FixNVESpinSIB : public Fix {
  public:
@@ -82,23 +84,28 @@ class FixNVESpinSIB : public Fix {
   // Pointer to ML spin pair style (base class)
   PairSpinML *pair_spin_ml;
 
-  // Pointers to fix langevin/spin/sib styles
-  int nlangspin_sib;
-  int maglangevin_sib_flag;
-  FixLangevinSpinSIB **locklangevinspin_sib;
+  // Pointers to standard PairSpin styles (e.g. spin/exchange, spin/dmi)
+  int npairspin;
+  PairSpin **spin_pairs;
 
-  // Pointers to fix glangevin/spin/sib styles (generalized Langevin for variable-length spins)
-  int nglangspin_sib;
-  int magglangevin_sib_flag;
-  FixGLangevinSpinSIB **lockglangevinspin_sib;
+  // Pointer to fix langevin/spin/sib (at most one allowed)
+  FixLangevinSpinSIB *locklangevinspin_sib;
 
-  // Pointers to fix precession/spin styles
+  // Pointer to fix glangevin/spin/sib (at most one allowed)
+  FixGLangevinSpinSIB *lockglangevinspin_sib;
+
+  // Pointers to fix precession/spin styles (multiple allowed)
   int nprecspin;
-  int precession_spin_flag;
   FixPrecessionSpin **lockprecessionspin;
+
+  // Pointers to fix landau/spin styles (multiple allowed)
+  int nlandauspin;
+  FixLandauSpin **locklandauspin;
 
   // Storage for SIB predictor-corrector method
   double **s_save;         // saved spin at start of half-step
+  double *mag_save;        // saved spin magnitude |m|^n for longitudinal corrector
+  double *H_par_save;      // saved H_∥ from longitudinal predictor for Heun averaging
   double **noise_vec;      // stored transverse noise vector (same for predictor and corrector)
   double *noise_L_vec;     // stored longitudinal noise (for glangevin)
   double **fm_full;        // full (unprojected) magnetic forces for longitudinal dynamics

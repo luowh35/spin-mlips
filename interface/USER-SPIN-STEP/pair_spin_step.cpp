@@ -190,11 +190,10 @@ struct LAMMPS_NS::PairSpinSTEPImpl {
           } else {
             // j is a ghost atom, map back to local atom using tag
             int j_local = atom->map(tag[j]);
-            // atom->map returns -1 if not found, but for ghost atoms of local atoms
-            // it should always return a valid local index
-            if (j_local < 0) {
-              // This shouldn't happen for periodic ghosts of local atoms
-              // but if it does, skip this pair
+            // atom->map returns -1 if not found, or could return a ghost index
+            // (>= nlocal) if the atom is not owned by this rank.
+            // Only local indices [0, nlocal) are valid for the node tensor.
+            if (j_local < 0 || j_local >= nlocal) {
               continue;
             }
             edge.j_local = j_local;

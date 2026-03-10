@@ -168,32 +168,6 @@ void FixLangevinSpinSIB::apply_gil_factor(double fmi[3])
 }
 
 /* ----------------------------------------------------------------------
-   Standard Langevin computation (for compatibility)
-   Generates new noise each time
-------------------------------------------------------------------------- */
-
-void FixLangevinSpinSIB::compute_single_langevin(int i, double spi[3], double fmi[3])
-{
-  int *mask = atom->mask;
-  if (mask[i] & groupbit) {
-    // Step 1: Add noise (only if temp_flag)
-    if (temp_flag) {
-      double noise[3];
-      noise[0] = random->gaussian();
-      noise[1] = random->gaussian();
-      noise[2] = random->gaussian();
-      add_noise(fmi, noise);
-    }
-
-    // Step 2: Add damping using noisy field
-    if (tdamp_flag) add_tdamping(spi, fmi);
-
-    // Step 3: Apply Gilbert factor (only if temp_flag)
-    if (temp_flag) apply_gil_factor(fmi);
-  }
-}
-
-/* ----------------------------------------------------------------------
    SIB predictor step: generate noise and store it
 ------------------------------------------------------------------------- */
 
@@ -217,8 +191,8 @@ void FixLangevinSpinSIB::compute_single_langevin_store_noise(int i, double spi[3
     // Step 2: Add damping using noisy field
     if (tdamp_flag) add_tdamping(spi, fmi);
 
-    // Step 3: Apply Gilbert factor
-    if (temp_flag) apply_gil_factor(fmi);
+    // Step 3: Apply Gilbert factor 1/(1+α²) whenever damping is present
+    if (tdamp_flag) apply_gil_factor(fmi);
   }
 }
 
@@ -240,7 +214,7 @@ void FixLangevinSpinSIB::compute_single_langevin_reuse_noise(int i, double spi[3
     // Step 2: Add damping at midpoint state using noisy field
     if (tdamp_flag) add_tdamping(spi, fmi);
 
-    // Step 3: Apply Gilbert factor
-    if (temp_flag) apply_gil_factor(fmi);
+    // Step 3: Apply Gilbert factor 1/(1+α²) whenever damping is present
+    if (tdamp_flag) apply_gil_factor(fmi);
   }
 }
