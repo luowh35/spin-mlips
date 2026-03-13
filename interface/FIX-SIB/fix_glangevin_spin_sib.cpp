@@ -255,10 +255,13 @@ void FixGLangevinSpinSIB::compute_single_langevin_reuse_noise(int i, double spi[
 /* ----------------------------------------------------------------------
    Longitudinal predictor (Heun method, first stage).
 
-   Computes H_∥ = (fm_full · ŝ) + H_entropy at the current state,
-   then performs a full Euler step in log-space:
-     u_pred = u^n + γ_L * H_∥ * dt_step
-     sp[i][3] = exp(u_pred)
+   Computes H_∥ = fm_full · ŝ at the current state, then performs
+   a linear-space Euler step:
+     m_pred = m^n + γ_L * H_∥ * dt_step
+
+   The physical equation is additive noise in m-space
+   (Ma & Dudarev, PRB 86, 054416, 2012):
+     dm/dt = γ_L * H_∥ + √(2 γ_L kT) * η(t)
 
    Returns H_∥ via H_par_out so the corrector can form the trapezoidal
    average (H_∥_1 + H_∥_2)/2.
@@ -295,23 +298,24 @@ void FixGLangevinSpinSIB::compute_longitudinal_predictor(int i, double spi[3],
 
     H_par_out = H_parallel;
 
-    double u_old = log(sp_mag);
-    double u_pred = u_old + gamma_L * H_parallel * dt_step;
+    // Linear-space Euler predictor: m_pred = m + γ_L * H_∥ * dt
+    // Reflect at m = 0 (E_L is even in m, so |m| is the correct boundary)
+    double m_pred = sp_mag + gamma_L * H_parallel * dt_step;
+    if (m_pred < SP_MAG_FLOOR) m_pred = fabs(m_pred) + SP_MAG_FLOOR;
 
-    sp[i][3] = exp(u_pred);
+    sp[i][3] = m_pred;
   }
 }
 
 /* ----------------------------------------------------------------------
    Longitudinal corrector (Heun method, second stage).
 
-   Computes H_∥_2 at the predicted state (s_mid, |m|_pred), then
-   applies the trapezoidal rule starting from the saved magnitude:
-     u_new = ln(mag_save) + γ_L * (H_∥_1 + H_∥_2)/2 * dt_step + σ_L * ξ
-     sp[i][3] = exp(u_new)
+   Computes H_∥_2 at the predicted state (s_mid, m_pred), then
+   applies the trapezoidal rule in linear m-space:
+     m_new = m_save + γ_L * (H_∥_1 + H_∥_2)/2 * dt_step + σ_L * ξ
 
    This gives second-order accuracy for the deterministic drift.
-   The noise ξ is a single Wiener increment for the full half-step dts.
+   The noise ξ is a single Wiener increment for the half-step dts.
 ------------------------------------------------------------------------- */
 
 void FixGLangevinSpinSIB::compute_longitudinal_corrector(int i, double spi[3],
@@ -337,7 +341,7 @@ void FixGLangevinSpinSIB::compute_longitudinal_corrector(int i, double spi[3],
     s_hat[1] = spi[1] / spi_norm;
     s_hat[2] = spi[2] / spi_norm;
 
-    // H_∥_2 evaluated at predicted state (|m|_pred is current sp[i][3])
+    // H_∥_2 evaluated at predicted state
     double H_parallel_2 = fmi[0] * s_hat[0] + fmi[1] * s_hat[1] + fmi[2] * s_hat[2];
 
     static constexpr double SP_MAG_FLOOR = 1.0e-10;
@@ -349,15 +353,18 @@ void FixGLangevinSpinSIB::compute_longitudinal_corrector(int i, double spi[3],
       noise_L_out = 0.0;
     }
 
-    // Heun corrector: trapezoidal average of drift, starting from saved magnitude
+    // Linear-space Heun corrector:
+    //   m_new = m_save + γ_L * (H_∥_1 + H_∥_2)/2 * dt + σ_L * ξ
     double mag_save_clamped = mag_save;
     if (mag_save_clamped <= SP_MAG_FLOOR) mag_save_clamped = SP_MAG_FLOOR;
 
-    double u_old = log(mag_save_clamped);
-    double du_det = gamma_L * 0.5 * (H_par_pred + H_parallel_2) * dt_step;
-    double du_noise = sigma_L * noise_L_out;
-    double u_new = u_old + du_det + du_noise;
+    double dm_det = gamma_L * 0.5 * (H_par_pred + H_parallel_2) * dt_step;
+    double dm_noise = sigma_L * noise_L_out;
+    double m_new = mag_save_clamped + dm_det + dm_noise;
 
-    sp[i][3] = exp(u_new);
+    // Reflect at m = 0 (E_L is even in m)
+    if (m_new < SP_MAG_FLOOR) m_new = fabs(m_new) + SP_MAG_FLOOR;
+
+    sp[i][3] = m_new;
   }
 }

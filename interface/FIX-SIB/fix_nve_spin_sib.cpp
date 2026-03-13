@@ -64,14 +64,33 @@ static const char cite_fix_nve_spin_sib[] =
   "doi={10.1016/j.jcp.2018.06.042}\n"
   "}\n\n";
 
+/* ----------------------------------------------------------------------
+   Helper: pad args with "lattice moving" if user omitted the keyword,
+   so that the FixNVESpin parent constructor receives valid arguments.
+------------------------------------------------------------------------- */
+
+static int sib_pad_narg(int narg) { return (narg < 5) ? 5 : narg; }
+
+static char **sib_pad_args(int narg, char **arg)
+{
+  static char *buf[5];
+  static char kw[] = "lattice";
+  static char val[] = "moving";
+  if (narg >= 5) return arg;
+  for (int i = 0; i < narg && i < 3; i++) buf[i] = arg[i];
+  buf[3] = kw;
+  buf[4] = val;
+  return buf;
+}
+
 /* ---------------------------------------------------------------------- */
 
 FixNVESpinSIB::FixNVESpinSIB(LAMMPS *lmp, int narg, char **arg) :
-  Fix(lmp, narg, arg),
-  pair_spin_ml(nullptr), npairspin(0), spin_pairs(nullptr),
+  FixNVESpin(lmp, sib_pad_narg(narg), sib_pad_args(narg, arg)),
+  pair_spin_ml(nullptr),
   locklangevinspin_sib(nullptr),
   lockglangevinspin_sib(nullptr),
-  lockprecessionspin(nullptr), nlandauspin(0), locklandauspin(nullptr),
+  nlandauspin(0), locklandauspin(nullptr),
   s_save(nullptr), mag_save(nullptr),
   H_par_save(nullptr), noise_vec(nullptr),
   noise_L_vec(nullptr), fm_full(nullptr)
@@ -80,16 +99,11 @@ FixNVESpinSIB::FixNVESpinSIB(LAMMPS *lmp, int narg, char **arg) :
 
   if (narg < 3) error->all(FLERR, "Illegal fix nve/spin/sib command");
 
-  time_integrate = 1;
+  // Parent constructor (FixNVESpin) already handled:
+  //   time_integrate, lattice_flag, atom map check,
+  //   lattice keyword parsing, atom/spin style check.
+  // Re-parse lattice keyword from original args in case narg was padded.
   lattice_flag = 1;
-  nlocal_max = 0;
-  nprecspin = 0;
-
-  // Check if atom map is defined
-  if (atom->map_style == Atom::MAP_NONE)
-    error->all(FLERR, "Fix nve/spin/sib requires an atom map, see atom_modify");
-
-  // Parse optional arguments
   int iarg = 3;
   while (iarg < narg) {
     if (strcmp(arg[iarg], "lattice") == 0) {
@@ -106,10 +120,6 @@ FixNVESpinSIB::FixNVESpinSIB(LAMMPS *lmp, int narg, char **arg) :
       error->all(FLERR, "Illegal fix nve/spin/sib command");
     }
   }
-
-  // Check if atom/spin style is defined
-  if (!atom->sp_flag)
-    error->all(FLERR, "Fix nve/spin/sib requires atom_style spin");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -122,9 +132,8 @@ FixNVESpinSIB::~FixNVESpinSIB()
   memory->destroy(noise_vec);
   memory->destroy(noise_L_vec);
   memory->destroy(fm_full);
-  delete[] lockprecessionspin;
+  // spin_pairs and lockprecessionspin are freed by parent ~FixNVESpin()
   delete[] locklandauspin;
-  delete[] spin_pairs;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -160,22 +169,33 @@ void FixNVESpinSIB::init()
   spin_pairs = nullptr;
   npairspin = 0;
 
-  // Count standard PairSpin styles
-  for (int i = 1; force->pair_match("^spin", 0, i); i++) {
-    Pair *p = force->pair_match("^spin", 0, i);
-    if (dynamic_cast<PairSpinML *>(p) == nullptr)
-      npairspin++;
-  }
+  // pair_match ignores nsub for non-hybrid pair styles (always returns the
+  // same pointer), so we must distinguish hybrid vs non-hybrid explicitly.
+  bool is_hybrid = (force->pair_match("^hybrid", 0) != nullptr);
 
-  // Fill pointer array
-  if (npairspin > 0) {
-    spin_pairs = new PairSpin*[npairspin];
-    int count = 0;
+  if (is_hybrid) {
+    // Hybrid: nsub=1,2,... iterates over matching sub-styles correctly
     for (int i = 1; force->pair_match("^spin", 0, i); i++) {
       Pair *p = force->pair_match("^spin", 0, i);
-      if (dynamic_cast<PairSpinML *>(p) == nullptr) {
-        spin_pairs[count++] = dynamic_cast<PairSpin *>(p);
+      if (dynamic_cast<PairSpinML *>(p) == nullptr)
+        npairspin++;
+    }
+    if (npairspin > 0) {
+      spin_pairs = new PairSpin*[npairspin];
+      int count = 0;
+      for (int i = 1; force->pair_match("^spin", 0, i); i++) {
+        Pair *p = force->pair_match("^spin", 0, i);
+        if (dynamic_cast<PairSpinML *>(p) == nullptr)
+          spin_pairs[count++] = dynamic_cast<PairSpin *>(p);
       }
+    }
+  } else {
+    // Non-hybrid: at most one pair style
+    Pair *p = force->pair_match("^spin", 0, 0);
+    if (p && dynamic_cast<PairSpinML *>(p) == nullptr) {
+      npairspin = 1;
+      spin_pairs = new PairSpin*[1];
+      spin_pairs[0] = dynamic_cast<PairSpin *>(p);
     }
   }
 
@@ -273,6 +293,12 @@ void FixNVESpinSIB::init()
     if (nlandauspin > 0)
       utils::logmesg(lmp, "Fix nve/spin/sib: {} fix landau/spin style(s) detected\n", nlandauspin);
   }
+
+  // Warn if glangevin/spin/sib is used without any longitudinal driving force
+  if (lockglangevinspin_sib && !pair_spin_ml && nlandauspin == 0)
+    error->warning(FLERR, "Fix nve/spin/sib: glangevin/spin/sib detected but no "
+                   "PairSpinML or fix landau/spin found. Longitudinal dynamics has "
+                   "no driving force — |m| will diverge under thermal noise.");
 }
 
 /* ---------------------------------------------------------------------- */
