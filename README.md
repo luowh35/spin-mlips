@@ -2,7 +2,7 @@
 
 # What does this repository contain?
 
-* C++ inference implementation of MagneticNEP neural network potential, supporting energy, force, and magnetic force calculations for magnetic systems.
+* C++ inference implementation of the Spin Tensor Equivariant Potential (STEP), supporting energy, force, and magnetic force calculations for magnetic systems.
 
 * LAMMPS interface packages for machine-learning spin potentials:
   - `USER-NEP-SPIN` — `pair_style spin/nep` (NEP-SPIN model)
