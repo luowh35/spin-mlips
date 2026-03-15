@@ -37,6 +37,7 @@ endif()
 set(SPIN_ML_SOURCES
   ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_nve_spin_sib.cpp
   ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_langevin_spin_sib.cpp
+  ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_glangevin_spin_sib.cpp
 )
 
 # Header files (for IDE integration)
@@ -44,6 +45,7 @@ set(SPIN_ML_HEADERS
   ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/pair_spin_ml.h
   ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_nve_spin_sib.h
   ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_langevin_spin_sib.h
+  ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_glangevin_spin_sib.h
 )
 
 # =============================================================================
@@ -65,7 +67,7 @@ target_compile_definitions(lammps PRIVATE USE_SPIN_ML)
 
 message(STATUS "")
 message(STATUS "USER-SPIN-ML Configuration Summary:")
-message(STATUS "  Components: fix nve/spin/sib, fix langevin/spin/sib")
+message(STATUS "  Components: fix nve/spin/sib, fix langevin/spin/sib, fix glangevin/spin/sib")
 message(STATUS "  Base class: pair_spin_ml.h (header-only)")
 message(STATUS "  Source files: ${SPIN_ML_SOURCES}")
 message(STATUS "")

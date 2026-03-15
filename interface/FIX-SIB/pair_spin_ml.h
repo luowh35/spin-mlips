@@ -47,7 +47,21 @@ class PairSpinML : public PairSpin {
   // Distribute cached magnetic forces to the fm array
   // This is called by fix nve/spin/sib after recompute_forces()
   // to update fm without modifying f (atomic forces).
+  // These are the PROJECTED (perpendicular to magmom) forces for transverse dynamics.
   virtual void distribute_cached_mag_forces() = 0;
+
+  // Distribute the full (unprojected) magnetic forces to the fm_full array.
+  // This includes the longitudinal component dE/d|m| needed for variable-length
+  // spin dynamics (glangevin). Called by fix nve/spin/sib for the longitudinal step.
+  // Default implementation zeros the array; override in derived classes that
+  // cache the unprojected gradient.
+  virtual void distribute_full_mag_forces(double **fm_full, int nlocal) {
+    for (int i = 0; i < nlocal; i++) {
+      fm_full[i][0] = 0.0;
+      fm_full[i][1] = 0.0;
+      fm_full[i][2] = 0.0;
+    }
+  }
 };
 
 }    // namespace LAMMPS_NS

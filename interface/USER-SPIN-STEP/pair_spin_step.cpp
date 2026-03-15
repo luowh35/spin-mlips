@@ -69,6 +69,9 @@ struct LAMMPS_NS::PairSpinSTEPImpl {
   // Cached magnetic forces for compute_single_pair
   torch::Tensor cached_mag_forces;
 
+  // Cached full (unprojected) magnetic forces for longitudinal dynamics
+  torch::Tensor cached_full_mag_forces;
+
   // Cache for last valid gradients (used when NaN occurs)
   torch::Tensor last_valid_mag_grads;
   bool has_valid_grads = false;
@@ -187,11 +190,10 @@ struct LAMMPS_NS::PairSpinSTEPImpl {
           } else {
             // j is a ghost atom, map back to local atom using tag
             int j_local = atom->map(tag[j]);
-            // atom->map returns -1 if not found, but for ghost atoms of local atoms
-            // it should always return a valid local index
-            if (j_local < 0) {
-              // This shouldn't happen for periodic ghosts of local atoms
-              // but if it does, skip this pair
+            // atom->map returns -1 if not found, or could return a ghost index
+            // (>= nlocal) if the atom is not owned by this rank.
+            // Only local indices [0, nlocal) are valid for the node tensor.
+            if (j_local < 0 || j_local >= nlocal) {
               continue;
             }
             edge.j_local = j_local;
@@ -561,6 +563,7 @@ void PairSpinSTEP::compute(int eflag, int vflag)
       eng_vdwl = 0.0;
       forces_cached_ = true;
       impl_->cached_mag_forces = torch::zeros({nlocal, 3}, torch::kFloat32);
+      impl_->cached_full_mag_forces = torch::zeros({nlocal, 3}, torch::kFloat32);
       return;
     }
 
@@ -618,7 +621,8 @@ void PairSpinSTEP::compute(int eflag, int vflag)
     auto forces_tensor = -pos_grads;
 
     // 9. Magnetic forces: project to perpendicular direction
-    auto mag_forces_tensor = step::project_forces_perpendicular(-mag_grads, magmoms);
+    auto full_mag_forces = -mag_grads;  // full (unprojected) for longitudinal dynamics
+    auto mag_forces_tensor = step::project_forces_perpendicular(full_mag_forces, magmoms);
 
     // Handle NaN after projection
     bool has_nan_projected = step::has_nan(mag_forces_tensor);
@@ -658,6 +662,7 @@ void PairSpinSTEP::compute(int eflag, int vflag)
 
     // 12. Cache magnetic forces for compute_single_pair
     impl_->cached_mag_forces = mag_forces_cpu.detach().clone();
+    impl_->cached_full_mag_forces = full_mag_forces.cpu().detach().clone();
     forces_cached_ = true;
 
     // 13. Energy bookkeeping
@@ -767,6 +772,7 @@ void PairSpinSTEP::recompute_forces()
 
     if (neighbors.n_pairs == 0) {
       impl_->cached_mag_forces = torch::zeros({nlocal, 3}, torch::kFloat32);
+      impl_->cached_full_mag_forces = torch::zeros({nlocal, 3}, torch::kFloat32);
       forces_cached_ = true;
       return;
     }
@@ -782,6 +788,12 @@ void PairSpinSTEP::recompute_forces()
     std::vector<torch::jit::IValue> inputs;
     inputs.push_back(data_dict);
     auto atomic_energies = impl_->model.forward(inputs).toTensor();
+
+    // Check for NaN in energies
+    if (step::has_nan(atomic_energies)) {
+      error->warning(FLERR, "SPIN-STEP recompute_forces: NaN detected in atomic energies");
+    }
+
     auto total_energy = atomic_energies.sum();
 
     auto grads = torch::autograd::grad(
@@ -805,7 +817,8 @@ void PairSpinSTEP::recompute_forces()
     }
 
     // Project to perpendicular direction
-    auto mag_forces_tensor = step::project_forces_perpendicular(-mag_grads, magmoms);
+    auto full_mag_forces = -mag_grads;  // full (unprojected) for longitudinal dynamics
+    auto mag_forces_tensor = step::project_forces_perpendicular(full_mag_forces, magmoms);
 
     // Handle NaN after projection
     bool has_nan_projected = step::has_nan(mag_forces_tensor);
@@ -819,6 +832,7 @@ void PairSpinSTEP::recompute_forces()
 
     // Cache magnetic forces (only local atoms now, no ghost accumulation needed)
     impl_->cached_mag_forces = mag_forces_tensor.cpu().detach().clone();
+    impl_->cached_full_mag_forces = full_mag_forces.cpu().detach().clone();
     forces_cached_ = true;
 
   } catch (const c10::Error &e) {
@@ -856,5 +870,37 @@ void PairSpinSTEP::distribute_cached_mag_forces()
       fm[i][1] += mag * static_cast<double>(mag_accessor[i][1]) / hbar;
       fm[i][2] += mag * static_cast<double>(mag_accessor[i][2]) / hbar;
     }
+  }
+}
+
+// =============================================================================
+// Distribute Full (Unprojected) Magnetic Forces - For longitudinal dynamics
+// =============================================================================
+
+void PairSpinSTEP::distribute_full_mag_forces(double **fm_full, int nlocal_in)
+{
+  if (!forces_cached_) {
+    for (int i = 0; i < nlocal_in; i++) {
+      fm_full[i][0] = 0.0;
+      fm_full[i][1] = 0.0;
+      fm_full[i][2] = 0.0;
+    }
+    return;
+  }
+
+  auto full_forces_cpu = impl_->cached_full_mag_forces.cpu();
+  auto full_accessor = full_forces_cpu.accessor<float, 2>();
+
+  // fm_full = cached_full_mag_forces = -dE/dm (raw gradient in eV/μ_B)
+  // NO mag/hbar conversion here! The longitudinal step needs the raw energy
+  // gradient, not the transverse field (rad/ps). The transverse conversion
+  // fm = mag * force / hbar is only for precession dynamics (dŝ/dt = ŝ × fm).
+  // For longitudinal dynamics: d|m|/dt = γ_L * (-dE/d|m|), where γ_L is in
+  // μ_B²/(eV·ps) and (-dE/d|m|) = (-dE/dm)·m̂ is in eV/μ_B.
+  // This matches SPILADY's additive update: ds += gamma_S_HL * dt * Heff.
+  for (int i = 0; i < nlocal_in; i++) {
+    fm_full[i][0] = static_cast<double>(full_accessor[i][0]);
+    fm_full[i][1] = static_cast<double>(full_accessor[i][1]);
+    fm_full[i][2] = static_cast<double>(full_accessor[i][2]);
   }
 }

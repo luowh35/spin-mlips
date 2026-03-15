@@ -58,6 +58,9 @@ class PairSpinSTEP : public PairSpinML {
   // PairSpinML interface - distribute cached magnetic forces to fm array
   void distribute_cached_mag_forces() override;
 
+  // PairSpinML interface - distribute full (unprojected) magnetic forces
+  void distribute_full_mag_forces(double **fm_full, int nlocal) override;
+
  protected:
   // pimpl to hide torch dependencies
   std::unique_ptr<PairSpinSTEPImpl> impl_;

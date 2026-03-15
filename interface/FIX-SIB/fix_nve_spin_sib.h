@@ -50,16 +50,17 @@ FixStyle(nve/spin/sib,FixNVESpinSIB)
 #ifndef LMP_FIX_NVE_SPIN_SIB_H
 #define LMP_FIX_NVE_SPIN_SIB_H
 
-#include "fix.h"
+#include "fix_nve_spin.h"
 
 namespace LAMMPS_NS {
 
 // Forward declarations
 class FixLangevinSpinSIB;
-class FixPrecessionSpin;
+class FixGLangevinSpinSIB;
+class FixLandauSpin;
 class PairSpinML;
 
-class FixNVESpinSIB : public Fix {
+class FixNVESpinSIB : public FixNVESpin {
  public:
   FixNVESpinSIB(class LAMMPS *, int, char **);
   ~FixNVESpinSIB() override;
@@ -69,31 +70,27 @@ class FixNVESpinSIB : public Fix {
   void initial_integrate(int) override;
   void final_integrate() override;
 
-  int lattice_flag;    // lattice_flag = 0 if spins only (frozen lattice)
-                       // lattice_flag = 1 if spin-lattice coupling
-
  protected:
-  double dtv, dtf, dts;    // velocity, force, and spin timesteps
-                           // dts = dt/2 for half-step SIB updates
-
-  int nlocal_max;    // max value of nlocal (for size of arrays)
-
   // Pointer to ML spin pair style (base class)
   PairSpinML *pair_spin_ml;
 
-  // Pointers to fix langevin/spin/sib styles
-  int nlangspin_sib;
-  int maglangevin_sib_flag;
-  FixLangevinSpinSIB **locklangevinspin_sib;
+  // Pointer to fix langevin/spin/sib (at most one allowed)
+  FixLangevinSpinSIB *locklangevinspin_sib;
 
-  // Pointers to fix precession/spin styles
-  int nprecspin;
-  int precession_spin_flag;
-  FixPrecessionSpin **lockprecessionspin;
+  // Pointer to fix glangevin/spin/sib (at most one allowed)
+  FixGLangevinSpinSIB *lockglangevinspin_sib;
+
+  // Pointers to fix landau/spin styles (multiple allowed)
+  int nlandauspin;
+  FixLandauSpin **locklandauspin;
 
   // Storage for SIB predictor-corrector method
   double **s_save;         // saved spin at start of half-step
-  double **noise_vec;      // stored noise vector (same for predictor and corrector)
+  double *mag_save;        // saved spin magnitude |m|^n for longitudinal corrector
+  double *H_par_save;      // saved H_∥ from longitudinal predictor for Heun averaging
+  double **noise_vec;      // stored transverse noise vector (same for predictor and corrector)
+  double *noise_L_vec;     // stored longitudinal noise (for glangevin)
+  double **fm_full;        // full (unprojected) magnetic forces for longitudinal dynamics
 
   // Helper functions
   void sib_spin_half_step();  // perform one SIB half-step update
