@@ -66,6 +66,9 @@ struct LAMMPS_NS::PairSpinSTEPImpl {
   double scale;
   double shift;
 
+  // Model architecture flags
+  bool project_target_mag_force;
+
   // Cached magnetic forces for compute_single_pair
   torch::Tensor cached_mag_forces;
 
@@ -90,6 +93,7 @@ struct LAMMPS_NS::PairSpinSTEPImpl {
     avg_num_neighbors = 25.0;
     scale = 1.0;
     shift = 0.0;
+    project_target_mag_force = false;
   }
 
   // Data conversion methods
@@ -411,6 +415,9 @@ void PairSpinSTEP::load_model(const std::string &path)
       // Parse atom_types_map
       impl_->atom_types_map = step::extract_atom_types_map(config_json);
 
+      // Parse model architecture flags
+      impl_->project_target_mag_force = step::extract_bool(config_json, "project_target_mag_force", false);
+
       // If atom_types_map is empty, create default mapping from elements
       if (impl_->atom_types_map.empty()) {
         for (size_t i = 0; i < elements_.size(); i++) {
@@ -426,6 +433,8 @@ void PairSpinSTEP::load_model(const std::string &path)
                       impl_->r_max, impl_->num_features, impl_->lmax, impl_->num_layers);
         utils::logmesg(lmp, "SPIN-STEP: avg_num_neighbors={}, num_types={}\n",
                       impl_->avg_num_neighbors, impl_->num_types);
+        utils::logmesg(lmp, "SPIN-STEP: project_target_mag_force={}\n",
+                      impl_->project_target_mag_force ? "true" : "false");
       }
     } else {
       if (comm->me == 0) {
@@ -620,9 +629,14 @@ void PairSpinSTEP::compute(int eflag, int vflag)
     // 8. Compute forces (negative gradient of energy)
     auto forces_tensor = -pos_grads;
 
-    // 9. Magnetic forces: project to perpendicular direction
+    // 9. Magnetic forces: conditionally project to perpendicular direction
     auto full_mag_forces = -mag_grads;  // full (unprojected) for longitudinal dynamics
-    auto mag_forces_tensor = step::project_forces_perpendicular(full_mag_forces, magmoms);
+    torch::Tensor mag_forces_tensor;
+    if (impl_->project_target_mag_force) {
+      mag_forces_tensor = step::project_forces_perpendicular(full_mag_forces, magmoms);
+    } else {
+      mag_forces_tensor = full_mag_forces;
+    }
 
     // Handle NaN after projection
     bool has_nan_projected = step::has_nan(mag_forces_tensor);
@@ -816,9 +830,14 @@ void PairSpinSTEP::recompute_forces()
       impl_->has_valid_grads = true;
     }
 
-    // Project to perpendicular direction
+    // Conditionally project to perpendicular direction
     auto full_mag_forces = -mag_grads;  // full (unprojected) for longitudinal dynamics
-    auto mag_forces_tensor = step::project_forces_perpendicular(full_mag_forces, magmoms);
+    torch::Tensor mag_forces_tensor;
+    if (impl_->project_target_mag_force) {
+      mag_forces_tensor = step::project_forces_perpendicular(full_mag_forces, magmoms);
+    } else {
+      mag_forces_tensor = full_mag_forces;
+    }
 
     // Handle NaN after projection
     bool has_nan_projected = step::has_nan(mag_forces_tensor);
