@@ -68,6 +68,7 @@ struct LAMMPS_NS::PairSpinSTEPImpl {
 
   // Model architecture flags
   bool project_target_mag_force;
+  double S_ref;
 
   // Cached magnetic forces for compute_single_pair
   torch::Tensor cached_mag_forces;
@@ -94,6 +95,7 @@ struct LAMMPS_NS::PairSpinSTEPImpl {
     scale = 1.0;
     shift = 0.0;
     project_target_mag_force = false;
+    S_ref = 1.0;
   }
 
   // Data conversion methods
@@ -417,6 +419,7 @@ void PairSpinSTEP::load_model(const std::string &path)
 
       // Parse model architecture flags
       impl_->project_target_mag_force = step::extract_bool(config_json, "project_target_mag_force", false);
+      impl_->S_ref = step::extract_float(config_json, "S_ref", 1.0f);
 
       // If atom_types_map is empty, create default mapping from elements
       if (impl_->atom_types_map.empty()) {
@@ -435,6 +438,7 @@ void PairSpinSTEP::load_model(const std::string &path)
                       impl_->avg_num_neighbors, impl_->num_types);
         utils::logmesg(lmp, "SPIN-STEP: project_target_mag_force={}\n",
                       impl_->project_target_mag_force ? "true" : "false");
+        utils::logmesg(lmp, "SPIN-STEP: S_ref={}\n", impl_->S_ref);
       }
     } else {
       if (comm->me == 0) {
