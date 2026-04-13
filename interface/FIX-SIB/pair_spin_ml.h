@@ -55,6 +55,7 @@ class PairSpinML : public PairSpin {
   // spin dynamics (glangevin). Called by fix nve/spin/sib for the longitudinal step.
   // Default implementation zeros the array; override in derived classes that
   // cache the unprojected gradient.
+  virtual bool has_longitudinal_force() const { return false; }
   virtual void distribute_full_mag_forces(double **fm_full, int nlocal) {
     for (int i = 0; i < nlocal; i++) {
       fm_full[i][0] = 0.0;
