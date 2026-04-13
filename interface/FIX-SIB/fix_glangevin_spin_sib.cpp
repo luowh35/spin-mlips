@@ -59,12 +59,12 @@ using namespace MathConst;
 FixGLangevinSpinSIB::FixGLangevinSpinSIB(LAMMPS *lmp, int narg, char **arg) :
   Fix(lmp, narg, arg), random(nullptr)
 {
-  // Required arguments: temp alpha_t tau_L seed
+  // Required arguments: temp alpha_t gamma_L seed
   if (narg != 7) error->all(FLERR, "Illegal fix glangevin/spin/sib command: expected 7 arguments");
 
   temp = utils::numeric(FLERR, arg[3], false, lmp);
   alpha_t = utils::numeric(FLERR, arg[4], false, lmp);
-  tau_L = utils::numeric(FLERR, arg[5], false, lmp);
+  gamma_L = utils::numeric(FLERR, arg[5], false, lmp);
   seed = utils::inumeric(FLERR, arg[6], false, lmp);
 
   // Check validity
@@ -72,14 +72,10 @@ FixGLangevinSpinSIB::FixGLangevinSpinSIB(LAMMPS *lmp, int narg, char **arg) :
     error->all(FLERR, "Fix glangevin/spin/sib alpha_t must be >= 0");
   if (temp < 0.0)
     error->all(FLERR, "Fix glangevin/spin/sib temperature must be >= 0");
-  if (tau_L <= 0.0)
-    error->all(FLERR, "Fix glangevin/spin/sib tau_L must be > 0");
+  if (gamma_L <= 0.0)
+    error->all(FLERR, "Fix glangevin/spin/sib gamma_L must be > 0");
   if (seed <= 0)
     error->all(FLERR, "Illegal fix glangevin/spin/sib seed");
-
-  // Convert relaxation time to damping coefficient
-  // gamma_L = 1/tau_L (in ps^-1)
-  gamma_L = 1.0 / tau_L;
 
   // Set flags
   tdamp_flag = 0;
@@ -146,8 +142,9 @@ void FixGLangevinSpinSIB::init()
   sigma_T = sqrt(2.0 * D_T);
 
   // Calculate longitudinal noise strength
-  // Based on SPILADY: noise term per half-step is sqrt(2 * γ_L * k_B * T * dts) * ξ
-  // gamma_L = 1/tau_L (in ps^-1)
+  // Based on SPILADY in m-space:
+  //   dm = gamma_L * H_parallel * dt + sqrt(2 * k_B * T * gamma_L * dt) * ξ
+  // where gamma_L has units 1/(eV*ps) and H_parallel is in eV.
   // Note: sigma_L here is the strength per half-step (not per full step)
   sigma_L = sqrt(2.0 * gamma_L * kb * temp * dts);
 
@@ -155,7 +152,7 @@ void FixGLangevinSpinSIB::init()
     utils::logmesg(lmp, "Fix glangevin/spin/sib: Variable-length spin thermostat\n");
     utils::logmesg(lmp, "Fix glangevin/spin/sib: Using dts = dt/2 = {} ps for SIB half-step\n", dts);
     utils::logmesg(lmp, "Fix glangevin/spin/sib: Transverse: alpha_t = {} (dimensionless), sigma_T = {}\n", alpha_t, sigma_T);
-    utils::logmesg(lmp, "Fix glangevin/spin/sib: Longitudinal: tau_L = {} ps, gamma_L = {} ps^-1, sigma_L = {}\n", tau_L, gamma_L, sigma_L);
+    utils::logmesg(lmp, "Fix glangevin/spin/sib: Longitudinal: gamma_L = {} 1/(eV*ps), sigma_L = {}\n", gamma_L, sigma_L);
   }
 }
 

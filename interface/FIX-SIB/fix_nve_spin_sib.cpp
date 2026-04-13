@@ -83,6 +83,16 @@ static char **sib_pad_args(int narg, char **arg)
   return buf;
 }
 
+static bool pair_ml_has_longitudinal_force(PairSpinML *pair_spin_ml)
+{
+  if (!pair_spin_ml) return false;
+
+  // Only pair styles that override distribute_full_mag_forces() provide a
+  // longitudinal restoring force for glangevin/spin/sib.
+  return (strcmp(pair_spin_ml->style, "spin/step") == 0) ||
+         (strcmp(pair_spin_ml->style, "spin/minip") == 0);
+}
+
 /* ---------------------------------------------------------------------- */
 
 FixNVESpinSIB::FixNVESpinSIB(LAMMPS *lmp, int narg, char **arg) :
@@ -295,10 +305,13 @@ void FixNVESpinSIB::init()
   }
 
   // Warn if glangevin/spin/sib is used without any longitudinal driving force
-  if (lockglangevinspin_sib && !pair_spin_ml && nlandauspin == 0)
+  if (lockglangevinspin_sib && nlandauspin == 0 &&
+      !pair_ml_has_longitudinal_force(pair_spin_ml))
     error->warning(FLERR, "Fix nve/spin/sib: glangevin/spin/sib detected but no "
-                   "PairSpinML or fix landau/spin found. Longitudinal dynamics has "
-                   "no driving force — |m| will diverge under thermal noise.");
+                   "longitudinal driving force is available. The active PairSpinML "
+                   "style does not provide distribute_full_mag_forces(), and no "
+                   "fix landau/spin was found. Longitudinal dynamics has no driving "
+                   "force — |m| will diverge under thermal noise.");
 }
 
 /* ---------------------------------------------------------------------- */
