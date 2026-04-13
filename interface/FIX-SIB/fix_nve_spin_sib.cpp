@@ -85,12 +85,7 @@ static char **sib_pad_args(int narg, char **arg)
 
 static bool pair_ml_has_longitudinal_force(PairSpinML *pair_spin_ml)
 {
-  if (!pair_spin_ml) return false;
-
-  // Only pair styles that override distribute_full_mag_forces() provide a
-  // longitudinal restoring force for glangevin/spin/sib.
-  return (strcmp(pair_spin_ml->style, "spin/step") == 0) ||
-         (strcmp(pair_spin_ml->style, "spin/minip") == 0);
+  return pair_spin_ml && pair_spin_ml->has_longitudinal_force();
 }
 
 /* ---------------------------------------------------------------------- */
