@@ -12,10 +12,10 @@
 ------------------------------------------------------------------------- */
 
 /* ----------------------------------------------------------------------
-   Combined spin+lattice minimizer (Product Manifold Optimization):
-   - Preconditioned gradient descent on M = R^{3N} x (S^2)^N
-   - Scale balancing via lambda factor
-   - Armijo backtracking line search
+   Combined spin+lattice minimizer:
+   - FIRE algorithm for lattice optimization
+   - Riemannian L-BFGS for spin optimization (alternating)
+   - Each outer iteration: 1 FIRE step for atoms, then N L-BFGS steps for spins
 ------------------------------------------------------------------------- */
 
 #ifdef MINIMIZE_CLASS
@@ -53,6 +53,16 @@ class MinSpinLattice : public Min {
   double *p_atom;                // atomic search direction
   double *p_spin;                // spin search direction (tangent vector)
 
+  // FIRE algorithm variables (for lattice optimization)
+  double *v_atom;                // atomic velocities
+  double dt_atom;                // time step for lattice
+  double dt_max_atom;            // maximum time step
+  double alpha_fire;             // FIRE mixing parameter
+  double f_inc;                  // time step increase factor
+  double f_dec;                  // time step decrease factor
+  int n_min;                     // minimum steps before increasing dt
+  int last_negative;             // steps since last P < 0
+
   // Full magnetic forces (for PairSpinML)
   double **fm_full;              // unprojected magnetic forces (-dE/dm)
   int fm_full_allocated;
@@ -60,26 +70,39 @@ class MinSpinLattice : public Min {
   // PairSpinML detection
   class PairSpinML *pair_spin_ml;
 
+  // L-BFGS parameters for spin optimization
+  int lbfgs_mem;                 // number of history vectors to store
+  int lbfgs_iter;                // current L-BFGS iteration
+  double **s_spin;               // history: position differences (tangent vectors)
+  double **y_spin;               // history: gradient differences (tangent vectors)
+  double *rho_spin;              // history: 1 / <s, y>
+  double *alpha_lbfgs;           // temporary array for two-loop recursion
+  double *g_spin_old;            // previous spin gradient for L-BFGS
+  int spin_substeps;             // number of L-BFGS spin steps per FIRE atom step
+
   // Line search parameters
   double alpha_init;             // initial step size
   double alpha_min;              // minimum step size
   double c1;                     // Armijo constant
   double backtrack_factor;       // backtracking shrink factor
 
-  // Scale balancing
-  double lambda;                 // balance factor between atom and spin
-  double lambda_max;             // maximum lambda to prevent huge atom steps
-  double lambda_scale;           // manual scaling factor for lambda
-  double eps_lambda;             // small constant for lambda calculation
+  // Scale balancing (unused in alternating mode, kept for future)
+  double lambda;
+  double lambda_max;
+  double lambda_scale;
+  double eps_lambda;
 
   // Methods
   void calc_atom_gradient();
   void calc_spin_gradient();
-  void calc_search_direction();
-  double compute_lambda();
-  double line_search();
-  void advance_atoms(double alpha);
+  void calc_spin_lbfgs_direction();
+  void advance_atoms_fire();     // FIRE update for atoms
   void advance_spins(double alpha);
+  void fire_reset();             // Reset FIRE parameters
+  void vector_transport(double *vec, int n);
+  void update_lbfgs_history(double alpha);
+  void realloc_arrays(int nlocal);
+  int spin_lbfgs_substep();      // single L-BFGS spin substep, returns neval
 };
 
 }    // namespace LAMMPS_NS

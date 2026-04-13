@@ -23,14 +23,14 @@
    For fixed-length spin dynamics, use fix langevin/spin/sib instead.
 
    Usage:
-     fix ID group glangevin/spin/sib temp alpha_t tau_L seed
+     fix ID group glangevin/spin/sib temp alpha_t gamma_L seed
 
    Parameters:
      temp    : spin bath temperature (K)
      alpha_t : transverse (Gilbert) damping coefficient (dimensionless, typical: 0.01)
-     tau_L   : longitudinal relaxation time (ps, typical: 0.01-0.1)
-               Controls spin magnitude relaxation rate
-               Internally converted to gamma_L = 1/tau_L
+     gamma_L : longitudinal mobility coefficient (1/(eV*ps))
+               Controls spin magnitude relaxation rate in m-space
+               For Fe, a SPILADY-consistent value is ~235.75 1/(eV*ps)
      seed    : random number seed
 
    References:
@@ -85,8 +85,7 @@ class FixGLangevinSpinSIB : public Fix {
   double gil_factor;    // Gilbert's prefactor = 1/(1+alpha_t^2)
 
   // Longitudinal damping parameters
-  double tau_L;         // longitudinal relaxation time (ps)
-  double gamma_L;       // longitudinal damping coefficient = 1/tau_L (ps^-1)
+  double gamma_L;       // longitudinal mobility in dm/dt = gamma_L * H_par
   double sigma_L;       // longitudinal noise strength per half-step
 
   class RanMars *random;

@@ -137,7 +137,11 @@ double FixLandauSpin::compute_scalar()
 
 void FixLandauSpin::compute_single_landau(int i, double mag, double *fm_full_i)
 {
+  int *mask = atom->mask;
   double **sp = atom->sp;
+
+  // Respect this fix's group when used alongside other landau/spin fixes.
+  if (!(mask[i] & groupbit)) return;
 
   // H_L = -dE/d|m| = -sum_k n_k * a_{n_k} * m^{n_k - 1}
   double H_L = 0.0;

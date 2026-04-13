@@ -79,14 +79,14 @@ Generalized Langevin thermostat for variable-length spin dynamics. Both spin
 direction and magnitude `|m|` evolve, enabling longitudinal spin fluctuations.
 
 ```
-fix ID group glangevin/spin/sib temp alpha_t tau_L seed
+fix ID group glangevin/spin/sib temp alpha_t gamma_L seed
 ```
 
 Parameters:
 - `temp` — spin bath temperature (K)
 - `alpha_t` — transverse (Gilbert) damping coefficient (dimensionless, typical: 0.01–0.1)
-- `tau_L` — longitudinal relaxation time (ps, typical: 0.01–0.1).
-  Controls how fast `|m|` relaxes. Internally converted to `gamma_L = 1/tau_L`.
+- `gamma_L` — longitudinal mobility coefficient in `dm/dt = gamma_L * H_parallel`,
+  with units `1/(eV*ps)`. For Fe, a SPILADY-consistent value is about `235.75`.
 - `seed` — random number generator seed
 
 The longitudinal dynamics uses a Heun (trapezoidal) predictor-corrector scheme:
@@ -150,7 +150,7 @@ fix landau    all landau/spin a2 1.0 a4 -0.5
 fix nve       all nve/spin/sib lattice no
 
 # Generalized Langevin thermostat with longitudinal relaxation
-fix thermo    all glangevin/spin/sib 300.0 0.05 0.05 12345
+fix thermo    all glangevin/spin/sib 300.0 0.05 235.75 12345
 
 # Output
 thermo_style  custom step temp f_landau
