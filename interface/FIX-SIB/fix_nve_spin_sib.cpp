@@ -563,11 +563,13 @@ void FixNVESpinSIB::sib_spin_half_step()
       sp[i][2] = s_new[2];
 
       // Longitudinal corrector: Heun trapezoidal step + noise
-      // Uses H_par_save (from predictor) and fm_full (from NN#2)
-      // Resets from mag_save to apply the averaged drift
+      // Uses H_par_save (from predictor) and fm_full (from NN#2).
+      // Project fm_full onto the predicted midpoint orientation spi=s_mid,
+      // which is the state at which fm_full was evaluated.
+      // Resets from mag_save to apply the averaged drift.
       if (lockglangevinspin_sib) {
         lockglangevinspin_sib->compute_longitudinal_corrector(
-            i, s_new, fm_full[i], H_par_save[i], mag_save[i],
+            i, spi, fm_full[i], H_par_save[i], mag_save[i],
             noise_L_vec[i], dts);
       }
     }
