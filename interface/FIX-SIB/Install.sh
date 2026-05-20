@@ -27,6 +27,12 @@ action () {
 
 action fix_nve_spin_sib.cpp
 action fix_nve_spin_sib.h
+action fix_nh_spin_sib.cpp
+action fix_nh_spin_sib.h
+action fix_nvt_spin_sib.cpp
+action fix_nvt_spin_sib.h
+action fix_npt_spin_sib.cpp
+action fix_npt_spin_sib.h
 action fix_landau_spin.cpp
 action fix_landau_spin.h
 action fix_langevin_spin_sib.cpp

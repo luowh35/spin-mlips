@@ -34,6 +34,18 @@ using namespace LAMMPS_NS;
 using namespace FixConst;
 using namespace MathConst;
 
+static bool has_sib_spin_integrator(Modify *modify)
+{
+  for (int i = 0; i < modify->nfix; i++) {
+    const char *style = modify->fix[i]->style;
+    if (strcmp(style, "nve/spin/sib") == 0 ||
+        strcmp(style, "nvt/spin/sib") == 0 ||
+        strcmp(style, "npt/spin/sib") == 0)
+      return true;
+  }
+  return false;
+}
+
 /* ---------------------------------------------------------------------- */
 
 FixLangevinSpinSIB::FixLangevinSpinSIB(LAMMPS *lmp, int narg, char **arg) :
@@ -82,10 +94,10 @@ int FixLangevinSpinSIB::setmask()
 
 void FixLangevinSpinSIB::init()
 {
-  // Check if fix nve/spin/sib is defined
-  auto ema_fixes = modify->get_fix_by_style("^nve/spin/sib$");
-  if (ema_fixes.empty())
-    error->warning(FLERR, "Fix langevin/spin/sib should be used with fix nve/spin/sib");
+  // Check if a SIB spin integrator is defined
+  if (!has_sib_spin_integrator(modify))
+    error->warning(FLERR, "Fix langevin/spin/sib should be used with fix "
+                   "nve/spin/sib, nvt/spin/sib, or npt/spin/sib");
 
   // Verify this fix comes after force fixes
   int flag_force = 0;
@@ -176,7 +188,12 @@ void FixLangevinSpinSIB::compute_single_langevin_store_noise(int i, double spi[3
 {
   int *mask = atom->mask;
   if (mask[i] & groupbit) {
-    // Step 1: Generate and store noise, add to force
+    // Match LAMMPS fix langevin/spin ordering: damp the deterministic field,
+    // then add the stochastic field. Damping the sampled noise changes the
+    // fluctuation-dissipation balance.
+    if (tdamp_flag) add_tdamping(spi, fmi);
+
+    // Step 2: Generate and store noise, add to force
     if (temp_flag) {
       noise_out[0] = random->gaussian();
       noise_out[1] = random->gaussian();
@@ -187,9 +204,6 @@ void FixLangevinSpinSIB::compute_single_langevin_store_noise(int i, double spi[3
       noise_out[1] = 0.0;
       noise_out[2] = 0.0;
     }
-
-    // Step 2: Add damping using noisy field
-    if (tdamp_flag) add_tdamping(spi, fmi);
 
     // Step 3: Apply Gilbert factor 1/(1+α²) whenever damping is present
     if (tdamp_flag) apply_gil_factor(fmi);
@@ -206,13 +220,13 @@ void FixLangevinSpinSIB::compute_single_langevin_reuse_noise(int i, double spi[3
 {
   int *mask = atom->mask;
   if (mask[i] & groupbit) {
-    // Step 1: Reuse stored noise
+    // Step 1: Add damping at midpoint state to the deterministic field
+    if (tdamp_flag) add_tdamping(spi, fmi);
+
+    // Step 2: Reuse stored noise
     if (temp_flag) {
       add_noise(fmi, noise_in);
     }
-
-    // Step 2: Add damping at midpoint state using noisy field
-    if (tdamp_flag) add_tdamping(spi, fmi);
 
     // Step 3: Apply Gilbert factor 1/(1+α²) whenever damping is present
     if (tdamp_flag) apply_gil_factor(fmi);

@@ -69,6 +69,9 @@ struct LAMMPS_NS::PairSpinSTEPImpl {
   // Model architecture flags
   bool project_target_mag_force;
   double S_ref;
+  bool supports_stress;
+  std::string stress_mode;
+  std::string model_definition;
 
   // Cached magnetic forces for compute_single_pair
   torch::Tensor cached_mag_forces;
@@ -96,6 +99,9 @@ struct LAMMPS_NS::PairSpinSTEPImpl {
     shift = 0.0;
     project_target_mag_force = false;
     S_ref = 1.0;
+    supports_stress = true;
+    stress_mode = "external_autograd_strain";
+    model_definition = "unknown";
   }
 
   // Data conversion methods
@@ -258,6 +264,7 @@ PairSpinSTEP::PairSpinSTEP(LAMMPS *lmp) : PairSpinML(lmp)
   restartinfo = 0;
   one_coeff = 1;
   manybody_flag = 1;
+  no_virial_fdotr_compute = 1;
 
   // Create implementation object
   impl_ = std::make_unique<PairSpinSTEPImpl>();
@@ -420,6 +427,9 @@ void PairSpinSTEP::load_model(const std::string &path)
       // Parse model architecture flags
       impl_->project_target_mag_force = step::extract_bool(config_json, "project_target_mag_force", false);
       impl_->S_ref = step::extract_float(config_json, "S_ref", 1.0f);
+      impl_->supports_stress = step::extract_bool(config_json, "supports_stress", true);
+      impl_->stress_mode = step::extract_string(config_json, "stress_mode", "external_autograd_strain");
+      impl_->model_definition = step::extract_string(config_json, "model_definition", "unknown");
 
       // If atom_types_map is empty, create default mapping from elements
       if (impl_->atom_types_map.empty()) {
@@ -439,6 +449,20 @@ void PairSpinSTEP::load_model(const std::string &path)
         utils::logmesg(lmp, "SPIN-STEP: project_target_mag_force={}\n",
                       impl_->project_target_mag_force ? "true" : "false");
         utils::logmesg(lmp, "SPIN-STEP: S_ref={}\n", impl_->S_ref);
+        utils::logmesg(lmp, "SPIN-STEP: model_definition={}\n", impl_->model_definition);
+        utils::logmesg(lmp, "SPIN-STEP: supports_stress={}, stress_mode={}\n",
+                      impl_->supports_stress ? "true" : "false", impl_->stress_mode);
+      }
+
+      if (!impl_->supports_stress && comm->me == 0) {
+        error->warning(FLERR,
+                       "SPIN-STEP: model metadata says supports_stress=false; "
+                       "pair_style will still compute virial via dE/deps, but this model export may be inconsistent");
+      }
+      if (impl_->stress_mode != "external_autograd_strain" && comm->me == 0) {
+        error->warning(FLERR,
+                       "SPIN-STEP: unexpected stress_mode in model metadata; "
+                       "current pair_style assumes stress is computed from homogeneous strain autodiff");
       }
     } else {
       if (comm->me == 0) {
@@ -580,15 +604,29 @@ void PairSpinSTEP::compute(int eflag, int vflag)
       return;
     }
 
-    // 4. Build input dictionary for model
+    // 4. Build a homogeneous deformation gradient so the virial can be
+    // obtained from dE/deps, with row-vector convention x' = x * (I + eps).
+    torch::Tensor eps;
+    torch::Tensor positions_def = positions;
+    torch::Tensor shifts_def = neighbors.shifts;
+    if (vflag_global) {
+      auto options = torch::TensorOptions().dtype(torch::kFloat32).device(impl_->device);
+      eps = torch::zeros({3, 3}, options);
+      eps.set_requires_grad(true);
+      auto defgrad = torch::eye(3, options) + eps;
+      positions_def = torch::matmul(positions, defgrad);
+      shifts_def = torch::matmul(neighbors.shifts, defgrad);
+    }
+
+    // 5. Build input dictionary for model
     c10::Dict<std::string, torch::Tensor> data_dict;
-    data_dict.insert("pos", positions);
+    data_dict.insert("pos", positions_def);
     data_dict.insert("numbers", numbers);
     data_dict.insert("magmoms", magmoms);
     data_dict.insert("edge_index", neighbors.edge_index);
-    data_dict.insert("shifts", neighbors.shifts);
+    data_dict.insert("shifts", shifts_def);
 
-    // 5. Model forward pass
+    // 6. Model forward pass
     std::vector<torch::jit::IValue> inputs;
     inputs.push_back(data_dict);
     auto atomic_energies = impl_->model.forward(inputs).toTensor();
@@ -601,10 +639,12 @@ void PairSpinSTEP::compute(int eflag, int vflag)
     // atomic_energies now has shape [nlocal, 1] since we only pass local atoms
     auto total_energy = atomic_energies.sum();
 
-    // 6. Compute gradients via autograd
+    // 7. Compute gradients via autograd
+    std::vector<torch::Tensor> grad_inputs = {positions, magmoms};
+    if (vflag_global) grad_inputs.push_back(eps);
     auto grads = torch::autograd::grad(
         {total_energy},
-        {positions, magmoms},
+        grad_inputs,
         /*grad_outputs=*/{},
         /*retain_graph=*/false,
         /*create_graph=*/false,
@@ -612,8 +652,10 @@ void PairSpinSTEP::compute(int eflag, int vflag)
 
     auto pos_grads = grads[0];
     auto mag_grads = grads[1];
+    torch::Tensor eps_grads;
+    if (vflag_global) eps_grads = grads[2];
 
-    // 7. Handle NaN in gradients
+    // 8. Handle NaN in gradients
     if (step::has_nan(pos_grads)) {
       error->warning(FLERR, "SPIN-STEP: NaN detected in position gradients");
       pos_grads = step::replace_nan(pos_grads);
@@ -630,10 +672,15 @@ void PairSpinSTEP::compute(int eflag, int vflag)
       impl_->has_valid_grads = true;
     }
 
-    // 8. Compute forces (negative gradient of energy)
+    if (vflag_global && step::has_nan(eps_grads)) {
+      error->warning(FLERR, "SPIN-STEP: NaN detected in strain gradients");
+      eps_grads = step::replace_nan(eps_grads);
+    }
+
+    // 9. Compute forces (negative gradient of energy)
     auto forces_tensor = -pos_grads;
 
-    // 9. Magnetic forces: conditionally project to perpendicular direction
+    // 10. Magnetic forces: conditionally project to perpendicular direction
     auto full_mag_forces = -mag_grads;  // full (unprojected) for longitudinal dynamics
     torch::Tensor mag_forces_tensor;
     if (impl_->project_target_mag_force) {
@@ -654,7 +701,7 @@ void PairSpinSTEP::compute(int eflag, int vflag)
       impl_->has_valid_projected_forces = true;
     }
 
-    // 10. Distribute atomic forces to LAMMPS arrays (only local atoms now)
+    // 11. Distribute atomic forces to LAMMPS arrays (only local atoms now)
     auto forces_cpu = forces_tensor.cpu();
     auto force_accessor = forces_cpu.accessor<float, 2>();
 
@@ -664,7 +711,22 @@ void PairSpinSTEP::compute(int eflag, int vflag)
       f[i][2] += static_cast<double>(force_accessor[i][2]);
     }
 
-    // 11. Distribute magnetic forces (only local atoms now)
+    // 11b. Tally the configurational virial from the homogeneous strain derivative.
+    // This matches pre_modelv7_plusstress.py: the TorchScript model returns energies only,
+    // while stress/virial are obtained externally from dE/deps with x' = x * (I + eps).
+    // Under this convention, dE/deps_ab = -virial_ab in LAMMPS ordering.
+    if (vflag_global) {
+      auto eps_cpu = eps_grads.cpu();
+      auto eacc = eps_cpu.accessor<float, 2>();
+      virial[0] += -static_cast<double>(eacc[0][0]);
+      virial[1] += -static_cast<double>(eacc[1][1]);
+      virial[2] += -static_cast<double>(eacc[2][2]);
+      virial[3] += -static_cast<double>(eacc[0][1]);
+      virial[4] += -static_cast<double>(eacc[0][2]);
+      virial[5] += -static_cast<double>(eacc[1][2]);
+    }
+
+    // 12. Distribute magnetic forces (only local atoms now)
     auto mag_forces_cpu = mag_forces_tensor.cpu();
     auto mag_accessor = mag_forces_cpu.accessor<float, 2>();
 
@@ -678,12 +740,12 @@ void PairSpinSTEP::compute(int eflag, int vflag)
       }
     }
 
-    // 12. Cache magnetic forces for compute_single_pair
+    // 13. Cache magnetic forces for compute_single_pair
     impl_->cached_mag_forces = mag_forces_cpu.detach().clone();
     impl_->cached_full_mag_forces = full_mag_forces.cpu().detach().clone();
     forces_cached_ = true;
 
-    // 13. Energy bookkeeping
+    // 14. Energy bookkeeping
     if (eflag_global) {
       eng_vdwl = total_energy.item<double>();
     }

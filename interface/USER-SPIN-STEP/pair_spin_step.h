@@ -59,6 +59,7 @@ class PairSpinSTEP : public PairSpinML {
   void distribute_cached_mag_forces() override;
 
   // PairSpinML interface - distribute full (unprojected) magnetic forces
+  bool has_longitudinal_force() const override { return true; }
   void distribute_full_mag_forces(double **fm_full, int nlocal) override;
 
  protected:

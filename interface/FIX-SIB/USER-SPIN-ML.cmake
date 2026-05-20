@@ -4,6 +4,8 @@
 # This package provides:
 # - pair_spin_ml.h: Abstract base class for ML spin pair styles
 # - fix nve/spin/sib: SIB integrator for spin-lattice dynamics
+# - fix nvt/spin/sib: Nose-Hoover + SIB integrator
+# - fix npt/spin/sib: Nose-Hoover/Parrinello-Rahman + SIB integrator
 # - fix langevin/spin/sib: Langevin thermostat for SIB method
 #
 # These components are shared by:
@@ -35,7 +37,10 @@ endif()
 # =============================================================================
 
 set(SPIN_ML_SOURCES
+  ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_nh_spin_sib.cpp
   ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_nve_spin_sib.cpp
+  ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_nvt_spin_sib.cpp
+  ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_npt_spin_sib.cpp
   ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_langevin_spin_sib.cpp
   ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_glangevin_spin_sib.cpp
   ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/min_spin_lattice.cpp
@@ -44,7 +49,10 @@ set(SPIN_ML_SOURCES
 # Header files (for IDE integration)
 set(SPIN_ML_HEADERS
   ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/pair_spin_ml.h
+  ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_nh_spin_sib.h
   ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_nve_spin_sib.h
+  ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_nvt_spin_sib.h
+  ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_npt_spin_sib.h
   ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_langevin_spin_sib.h
   ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/fix_glangevin_spin_sib.h
   ${LAMMPS_SOURCE_DIR}/USER-SPIN-ML/min_spin_lattice.h
@@ -69,7 +77,7 @@ target_compile_definitions(lammps PRIVATE USE_SPIN_ML)
 
 message(STATUS "")
 message(STATUS "USER-SPIN-ML Configuration Summary:")
-message(STATUS "  Components: fix nve/spin/sib, fix langevin/spin/sib, fix glangevin/spin/sib, min spin/lattice")
+message(STATUS "  Components: fix nve/nvt/npt spin/sib, fix langevin/spin/sib, fix glangevin/spin/sib, min spin/lattice")
 message(STATUS "  Base class: pair_spin_ml.h (header-only)")
 message(STATUS "  Source files: ${SPIN_ML_SOURCES}")
 message(STATUS "")
