@@ -48,6 +48,10 @@ class PairSpinSTEP : public PairSpinML {
   void init_style() override;
   double init_one(int, int) override;
   void *extract(const char *, int &) override;
+  int pack_forward_comm(int, int *, double *, int, int *) override;
+  void unpack_forward_comm(int, int, double *) override;
+  int pack_reverse_comm(int, int, double *) override;
+  void unpack_reverse_comm(int, int *, double *) override;
 
   // PairSpin interface for spin dynamics
   void compute_single_pair(int, double *) override;
@@ -80,10 +84,13 @@ class PairSpinSTEP : public PairSpinML {
 
   // Force caching for compute_single_pair
   bool forces_cached_;
+  int batch_size_;             // owned energy centers per forward/backward (0 = all)
+  int halo_layers_;            // message-passing depth, 0 = model metadata
 
   // Internal methods
   void allocate() override;
   void load_model(const std::string &path);
+  void evaluate(bool, int, int);
 };
 
 }    // namespace LAMMPS_NS

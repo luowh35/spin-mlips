@@ -36,7 +36,11 @@
 #include <torch/script.h>
 #include <torch/torch.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <functional>
+#include <stdexcept>
 #include <cstring>
 #include <iostream>
 #include <unordered_map>
@@ -79,13 +83,9 @@ struct LAMMPS_NS::PairSpinSTEPImpl {
   // Cached full (unprojected) magnetic forces for longitudinal dynamics
   torch::Tensor cached_full_mag_forces;
 
-  // Cache for last valid gradients (used when NaN occurs)
-  torch::Tensor last_valid_mag_grads;
-  bool has_valid_grads = false;
-
-  // Cache for last valid projected forces
-  torch::Tensor last_valid_projected_forces;
-  bool has_valid_projected_forces = false;
+  // Private CPU accumulation buffer: [atomic force, full magnetic force].
+  // Reverse communication sums these before writing owned LAMMPS forces.
+  std::vector<std::array<double, 6>> contributions;
 
   PairSpinSTEPImpl() : device(torch::kCPU) {
     // Default configuration
@@ -93,7 +93,7 @@ struct LAMMPS_NS::PairSpinSTEPImpl {
     num_types = 1;
     num_features = 64;
     lmax = 2;
-    num_layers = 3;
+    num_layers = -1;
     avg_num_neighbors = 25.0;
     scale = 1.0;
     shift = 0.0;
@@ -104,153 +104,60 @@ struct LAMMPS_NS::PairSpinSTEPImpl {
     model_definition = "unknown";
   }
 
-  // Data conversion methods
-  torch::Tensor convert_positions(double **x, int ntotal) {
-    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-    auto positions = torch::zeros({ntotal, 3}, options);
-    auto pos_accessor = positions.accessor<float, 2>();
+  struct Graph {
+    std::vector<int> atoms;  // tensor node -> LAMMPS index; energy centers first
+    std::vector<std::array<int64_t, 2>> edges;
+    std::vector<std::array<float, 3>> shifts;
+  };
 
-    for (int i = 0; i < ntotal; i++) {
-      pos_accessor[i][0] = static_cast<float>(x[i][0]);
-      pos_accessor[i][1] = static_cast<float>(x[i][1]);
-      pos_accessor[i][2] = static_cast<float>(x[i][2]);
+  // Only expand centers that can affect the requested owned energies in L layers.
+  // The outermost nodes need embeddings, but not their own neighbor lists.
+  Graph build_graph(NeighList *list, Atom *atom, int first, int count,
+                    int depth, double cutoff, bool serial) {
+    Graph graph;
+    const int nall = atom->nlocal + atom->nghost;
+    std::vector<int> node(nall, -1);
+    for (int i = first; i < first + count; ++i) {
+      node[i] = graph.atoms.size();
+      graph.atoms.push_back(i);
     }
-
-    return positions.to(device);
-  }
-
-  torch::Tensor convert_types(int *type, int ntotal, const std::vector<std::string>& elements) {
-    auto options = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
-    auto numbers = torch::zeros({ntotal}, options);
-    auto num_accessor = numbers.accessor<int64_t, 1>();
-
-    for (int i = 0; i < ntotal; i++) {
-      int lmp_type = type[i];
-      std::string elem = elements[lmp_type - 1];
-      int z = step::element_to_number(elem);
-
-      // Map atomic number to model type index
-      auto it = atom_types_map.find(z);
-      if (it != atom_types_map.end()) {
-        num_accessor[i] = it->second;
-      } else {
-        num_accessor[i] = 0;  // Default to first type
-      }
-    }
-
-    return numbers.to(device);
-  }
-
-  torch::Tensor convert_spins_to_magmoms(double **sp, int ntotal) {
-    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-    auto magmoms = torch::zeros({ntotal, 3}, options);
-    auto mag_accessor = magmoms.accessor<float, 2>();
-
-    for (int i = 0; i < ntotal; i++) {
-      double mag = sp[i][3];
-      mag_accessor[i][0] = static_cast<float>(sp[i][0] * mag);
-      mag_accessor[i][1] = static_cast<float>(sp[i][1] * mag);
-      mag_accessor[i][2] = static_cast<float>(sp[i][2] * mag);
-    }
-
-    return magmoms.to(device);
-  }
-
-  step::NeighborListData build_neighbor_list(NeighList *list, int nlocal, int ntotal,
-                                            double **x, double rc_sq, tagint *tag, Atom *atom) {
-    step::NeighborListData result;
-    result.n_pairs = 0;
-
-    int inum = list->inum;
-    int *ilist = list->ilist;
-    int *numneigh = list->numneigh;
-    int **firstneigh = list->firstneigh;
-
-    // Store pairs with shift vectors
-    // For ghost atoms, we map back to local atom index and compute shift
-    struct EdgeData {
-      int i_local;      // local atom index (dst)
-      int j_local;      // local atom index (src) - mapped from ghost if needed
-      double shift[3];  // shift vector = x[ghost] - x[local]
-    };
-    std::vector<EdgeData> valid_edges;
-    valid_edges.reserve(inum * 20);
-
-    for (int ii = 0; ii < inum; ii++) {
-      int i = ilist[ii];
-      int *jlist = firstneigh[i];
-      int jnum = numneigh[i];
-
-      for (int jj = 0; jj < jnum; jj++) {
-        int j = jlist[jj] & NEIGHMASK;
-
-        double dx = x[j][0] - x[i][0];
-        double dy = x[j][1] - x[i][1];
-        double dz = x[j][2] - x[i][2];
-        double rsq = dx*dx + dy*dy + dz*dz;
-
-        if (rsq < rc_sq) {
-          EdgeData edge;
-          edge.i_local = i;  // i is always local
-
-          if (j < nlocal) {
-            // j is a local atom
-            edge.j_local = j;
-            edge.shift[0] = 0.0;
-            edge.shift[1] = 0.0;
-            edge.shift[2] = 0.0;
-          } else {
-            // j is a ghost atom, map back to local atom using tag
-            int j_local = atom->map(tag[j]);
-            // atom->map returns -1 if not found, or could return a ghost index
-            // (>= nlocal) if the atom is not owned by this rank.
-            // Only local indices [0, nlocal) are valid for the node tensor.
-            if (j_local < 0 || j_local >= nlocal) {
-              continue;
-            }
-            edge.j_local = j_local;
-            // shift = x[ghost] - x[local] (the periodic displacement)
-            edge.shift[0] = x[j][0] - x[j_local][0];
-            edge.shift[1] = x[j][1] - x[j_local][1];
-            edge.shift[2] = x[j][2] - x[j_local][2];
+    size_t begin = 0;
+    for (int layer = 0; layer < depth; ++layer) {
+      const size_t end = graph.atoms.size();
+      for (size_t ni = begin; ni < end; ++ni) {
+        const int i = graph.atoms[ni];
+        for (int k = 0; k < list->numneigh[i]; ++k) {
+          const int image_j = list->firstneigh[i][k] & NEIGHMASK;
+          double rsq = 0.0;
+          for (int d = 0; d < 3; ++d) {
+            const double dx = atom->x[image_j][d] - atom->x[i][d];
+            rsq += dx * dx;
           }
-          valid_edges.push_back(edge);
+          if (rsq >= cutoff * cutoff) continue;
+          int j = image_j;
+          // On one rank all periodic copies can share the owned node. This
+          // avoids replicating the whole cell in GPU memory for small boxes.
+          if (serial && j >= atom->nlocal) {
+            j = atom->map(atom->tag[j]);
+            if (j < 0 || j >= atom->nlocal)
+              throw std::runtime_error("Cannot map periodic ghost to owned atom");
+          }
+          if (node[j] < 0) {
+            node[j] = graph.atoms.size();
+            graph.atoms.push_back(j);
+          }
+          graph.edges.push_back({static_cast<int64_t>(ni), node[j]});
+          graph.shifts.push_back({
+              static_cast<float>(atom->x[image_j][0] - atom->x[j][0]),
+              static_cast<float>(atom->x[image_j][1] - atom->x[j][1]),
+              static_cast<float>(atom->x[image_j][2] - atom->x[j][2])});
         }
       }
+      begin = end;
     }
-
-    int total_pairs = valid_edges.size();
-
-    if (total_pairs == 0) {
-      result.edge_index = torch::zeros({2, 0}, torch::kInt64).to(device);
-      result.shifts = torch::zeros({0, 3}, torch::kFloat32).to(device);
-      return result;
-    }
-
-    auto options_int = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU);
-    auto options_float = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-
-    auto edge_index = torch::zeros({2, total_pairs}, options_int);
-    result.shifts = torch::zeros({total_pairs, 3}, options_float);
-
-    auto edge_accessor = edge_index.accessor<int64_t, 2>();
-    auto shift_accessor = result.shifts.accessor<float, 2>();
-
-    for (int pair_idx = 0; pair_idx < total_pairs; pair_idx++) {
-      // edge_index[0] = dst (center), edge_index[1] = src (neighbor)
-      // Both are now local atom indices (0 to nlocal-1)
-      edge_accessor[0][pair_idx] = valid_edges[pair_idx].i_local;
-      edge_accessor[1][pair_idx] = valid_edges[pair_idx].j_local;
-      shift_accessor[pair_idx][0] = static_cast<float>(valid_edges[pair_idx].shift[0]);
-      shift_accessor[pair_idx][1] = static_cast<float>(valid_edges[pair_idx].shift[1]);
-      shift_accessor[pair_idx][2] = static_cast<float>(valid_edges[pair_idx].shift[2]);
-    }
-
-    result.edge_index = edge_index.to(device);
-    result.shifts = result.shifts.to(device);
-    result.n_pairs = total_pairs;
-    return result;
+    return graph;
   }
+
 };
 
 // =============================================================================
@@ -269,20 +176,10 @@ PairSpinSTEP::PairSpinSTEP(LAMMPS *lmp) : PairSpinML(lmp)
   // Create implementation object
   impl_ = std::make_unique<PairSpinSTEPImpl>();
 
-  // Auto-detect GPU and use if available
-  if (torch::cuda::is_available()) {
-    int num_gpus = torch::cuda::device_count();
-    int gpu_id = comm->me % num_gpus;
-    impl_->device = torch::Device(torch::kCUDA, gpu_id);
-    if (comm->me == 0) {
-      utils::logmesg(lmp, "SPIN-STEP: {} CUDA GPU(s) detected, using GPU acceleration\n", num_gpus);
-    }
-  } else {
-    impl_->device = torch::kCPU;
-    if (comm->me == 0) {
-      utils::logmesg(lmp, "SPIN-STEP: No CUDA GPU detected, using CPU\n");
-    }
-  }
+  comm_forward = 4;  // spin direction and magnitude at SIB substeps
+  comm_reverse = 6;  // atomic force and full magnetic force
+  batch_size_ = 0;
+  halo_layers_ = 0;
 
   model_loaded_ = false;
   forces_cached_ = false;
@@ -326,10 +223,51 @@ void PairSpinSTEP::allocate()
 // Settings
 // =============================================================================
 
-void PairSpinSTEP::settings(int narg, char ** /*arg*/)
+void PairSpinSTEP::settings(int narg, char **arg)
 {
-  if (narg > 0)
-    error->all(FLERR, "Illegal pair_style command: spin/step takes no arguments");
+  std::string device = "auto";
+  batch_size_ = 0;
+  halo_layers_ = 0;
+  for (int i = 0; i < narg; i += 2) {
+    if (i + 1 == narg) error->all(FLERR, "Missing spin/step option value");
+    if (strcmp(arg[i], "batch_size") == 0) {
+      batch_size_ = utils::inumeric(FLERR, arg[i+1], false, lmp);
+      if (batch_size_ < 0) error->all(FLERR, "spin/step batch_size must be nonnegative");
+    } else if (strcmp(arg[i], "halo_layers") == 0) {
+      halo_layers_ = utils::inumeric(FLERR, arg[i+1], false, lmp);
+      if (halo_layers_ < 1) error->all(FLERR, "spin/step halo_layers must be positive");
+    } else if (strcmp(arg[i], "device") == 0) {
+      device = arg[i+1];
+    } else error->all(FLERR, "Unknown spin/step option: {}", arg[i]);
+  }
+  // Rank within a shared-memory node, not the global MPI rank. Respect
+  // CUDA_VISIBLE_DEVICES (including schedulers exposing one GPU per rank).
+  int local_rank = comm->me;
+#if MPI_VERSION >= 3
+  MPI_Comm local_world;
+  MPI_Comm_split_type(world, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, &local_world);
+  MPI_Comm_rank(local_world, &local_rank);
+  MPI_Comm_free(&local_world);
+#endif
+  try {
+    if (device == "auto") {
+      if (torch::cuda::is_available())
+        impl_->device = torch::Device(torch::kCUDA, local_rank % torch::cuda::device_count());
+      else impl_->device = torch::Device(torch::kCPU);
+    } else {
+      impl_->device = torch::Device(device);
+      if (!impl_->device.is_cpu() && !impl_->device.is_cuda())
+        error->all(FLERR, "spin/step device must be auto, cpu, or cuda:N");
+      if (impl_->device.is_cuda() && (!torch::cuda::is_available() ||
+          !impl_->device.has_index() || impl_->device.index() >= torch::cuda::device_count()))
+        error->all(FLERR, "spin/step CUDA device is unavailable; use a visible cuda:N index");
+    }
+  } catch (const c10::Error &e) {
+    error->all(FLERR, "Invalid spin/step device: {}", e.what());
+  }
+  if (comm->me == 0)
+    utils::logmesg(lmp, "SPIN-STEP: {} MPI rank(s), rank 0 device {}, batch_size={}\n",
+                  comm->nprocs, impl_->device.str(), batch_size_);
 }
 
 // =============================================================================
@@ -402,6 +340,19 @@ void PairSpinSTEP::load_model(const std::string &path)
 
     impl_->model = torch::jit::load(path, impl_->device, extra_files);
     impl_->model.eval();
+    // map_location moves weights, but traced .to(device) calls also contain
+    // Device constants. Retarget them so cuda:0 exports work on every rank.
+    std::function<void(torch::jit::Block *)> retarget = [&](torch::jit::Block *block) {
+      for (auto *node : block->nodes()) {
+        if (node->kind() == torch::jit::prim::Constant && node->outputs().size() == 1 &&
+            node->output()->type()->kind() == c10::TypeKind::DeviceObjType &&
+            node->hasAttribute(torch::jit::attr::value))
+          node->s_(torch::jit::attr::value, impl_->device.str());
+        for (auto *sub : node->blocks()) retarget(sub);
+      }
+    };
+    for (auto module : impl_->model.modules())
+      for (auto method : module.get_methods()) retarget(method.graph()->block());
 
     std::string config_json = extra_files["config.json"];
     if (!config_json.empty()) {
@@ -476,6 +427,14 @@ void PairSpinSTEP::load_model(const std::string &path)
       impl_->num_types = elements_.size();
     }
 
+    if (halo_layers_ && impl_->num_layers > halo_layers_)
+      error->all(FLERR, "spin/step halo_layers is smaller than model num_layers");
+    if (!halo_layers_) halo_layers_ = impl_->num_layers;
+    if (halo_layers_ < 1)
+      error->all(FLERR, "spin/step needs num_layers in config.json or explicit halo_layers");
+    if (!std::isfinite(impl_->r_max) || impl_->r_max <= 0)
+      error->all(FLERR, "spin/step model r_max must be positive and finite");
+
     // Try to freeze model for faster inference
     if (impl_->model.hasattr("training")) {
       impl_->model = torch::jit::freeze(impl_->model);
@@ -510,15 +469,27 @@ void PairSpinSTEP::init_style()
   if (atom->map_style == Atom::MAP_NONE)
     error->all(FLERR, "Pair style spin/step requires atom_modify map array or hash");
 
+  // Ghost centers need neighbors for multi-hop inference. The physical
+  // neighbor cutoff stays r_max; only the communication halo is enlarged.
   neighbor->add_request(this, NeighConst::REQ_FULL | NeighConst::REQ_GHOST);
+  const double halo = (comm->nprocs == 1 ? cutoff_ : halo_layers_ * cutoff_) + neighbor->skin;
+  comm->cutghostuser = std::max(comm->cutghostuser, halo);
+  if (comm->mode != Comm::SINGLE)
+    error->all(FLERR, "spin/step requires comm_modify mode single");
+  if (neighbor->includegroup)
+    error->all(FLERR, "spin/step does not support neigh_modify include");
+  if (comm->me == 0)
+    utils::logmesg(lmp, "SPIN-STEP: message depth={}, communication halo={} Angstrom\n",
+                  halo_layers_, halo);
 
   if (force->newton_pair == 0)
     error->all(FLERR, "Pair style spin/step requires newton pair on");
 
   // Check for compatible spin integration fix
   auto nve_spin_fixes = modify->get_fix_by_style("^nve/spin$");
-  if ((comm->me == 0) && (nve_spin_fixes.size() == 0))
-    error->warning(FLERR, "Using spin pair style without nve/spin");
+  if (comm->nprocs > 1 && !nve_spin_fixes.empty())
+    error->all(FLERR, "MPI spin/step requires a collective SIB integrator (e.g. nve/spin/sib); "
+               "nve/spin uses asynchronous per-atom force evaluations");
 
   if (nve_spin_fixes.size() == 1) {
     lattice_flag = (dynamic_cast<FixNVESpin *>(nve_spin_fixes.front()))->lattice_flag;
@@ -558,211 +529,168 @@ void *PairSpinSTEP::extract(const char *str, int &dim)
 void PairSpinSTEP::compute(int eflag, int vflag)
 {
   ev_init(eflag, vflag);
+  evaluate(true, eflag, vflag);
+  distribute_cached_mag_forces();
+}
 
-  if (!model_loaded_) {
-    error->all(FLERR, "SPIN-STEP model not loaded");
-  }
-
-  double **x = atom->x;
-  double **f = atom->f;
-  double **sp = atom->sp;
-  double **fm = atom->fm;
-  int *type = atom->type;
-  tagint *tag = atom->tag;
-  int nlocal = atom->nlocal;
-  int nghost = atom->nghost;
-  int ntotal = nlocal + nghost;
-
+// All ranks must call this, including those with zero owned atoms. Batches
+// are independent energy sums; gradients are accumulated before communication.
+void PairSpinSTEP::evaluate(bool mechanical, int /*eflag*/, int /*vflag*/)
+{
+  if (!model_loaded_) error->all(FLERR, "SPIN-STEP model not loaded");
   forces_cached_ = false;
-
+  const int nlocal = atom->nlocal;
+  const int nall = nlocal + atom->nghost;
+  impl_->contributions.assign(nall, {});
+  comm->forward_comm(this);
   try {
-    // 1. Convert LAMMPS data to PyTorch tensors (only local atoms needed now)
-    auto positions = impl_->convert_positions(x, nlocal);
-    auto numbers = impl_->convert_types(type, nlocal, elements_);
-    auto magmoms = impl_->convert_spins_to_magmoms(sp, nlocal);
-
-    // 2. Enable gradient tracking
-    positions.set_requires_grad(true);
-    magmoms.set_requires_grad(true);
-
-    // 3. Build neighbor list with proper shifts for periodic boundaries
-    double rc_sq = cutoff_ * cutoff_;
-    auto neighbors = impl_->build_neighbor_list(list, nlocal, ntotal, x, rc_sq, tag, atom);
-
-    // Debug output for neighbor list
-    if (comm->me == 0 && update->ntimestep == 0) {
-      utils::logmesg(lmp, "SPIN-STEP DEBUG: nlocal={}, nghost={}, ntotal={}\n", nlocal, nghost, ntotal);
-      utils::logmesg(lmp, "SPIN-STEP DEBUG: cutoff={}, rc_sq={}\n", cutoff_, rc_sq);
-      utils::logmesg(lmp, "SPIN-STEP DEBUG: n_pairs={}\n", neighbors.n_pairs);
-    }
-
-    if (neighbors.n_pairs == 0) {
-      eng_vdwl = 0.0;
-      forces_cached_ = true;
-      impl_->cached_mag_forces = torch::zeros({nlocal, 3}, torch::kFloat32);
-      impl_->cached_full_mag_forces = torch::zeros({nlocal, 3}, torch::kFloat32);
-      return;
-    }
-
-    // 4. Build a homogeneous deformation gradient so the virial can be
-    // obtained from dE/deps, with row-vector convention x' = x * (I + eps).
-    torch::Tensor eps;
-    torch::Tensor positions_def = positions;
-    torch::Tensor shifts_def = neighbors.shifts;
-    if (vflag_global) {
-      auto options = torch::TensorOptions().dtype(torch::kFloat32).device(impl_->device);
-      eps = torch::zeros({3, 3}, options);
-      eps.set_requires_grad(true);
-      auto defgrad = torch::eye(3, options) + eps;
-      positions_def = torch::matmul(positions, defgrad);
-      shifts_def = torch::matmul(neighbors.shifts, defgrad);
-    }
-
-    // 5. Build input dictionary for model
-    c10::Dict<std::string, torch::Tensor> data_dict;
-    data_dict.insert("pos", positions_def);
-    data_dict.insert("numbers", numbers);
-    data_dict.insert("magmoms", magmoms);
-    data_dict.insert("edge_index", neighbors.edge_index);
-    data_dict.insert("shifts", shifts_def);
-
-    // 6. Model forward pass
-    std::vector<torch::jit::IValue> inputs;
-    inputs.push_back(data_dict);
-    auto atomic_energies = impl_->model.forward(inputs).toTensor();
-
-    // Check for NaN in energies
-    if (step::has_nan(atomic_energies)) {
-      error->warning(FLERR, "SPIN-STEP: NaN detected in atomic energies");
-    }
-
-    // atomic_energies now has shape [nlocal, 1] since we only pass local atoms
-    auto total_energy = atomic_energies.sum();
-
-    // 7. Compute gradients via autograd
-    std::vector<torch::Tensor> grad_inputs = {positions, magmoms};
-    if (vflag_global) grad_inputs.push_back(eps);
-    auto grads = torch::autograd::grad(
-        {total_energy},
-        grad_inputs,
-        /*grad_outputs=*/{},
-        /*retain_graph=*/false,
-        /*create_graph=*/false,
-        /*allow_unused=*/true);
-
-    auto pos_grads = grads[0];
-    auto mag_grads = grads[1];
-    torch::Tensor eps_grads;
-    if (vflag_global) eps_grads = grads[2];
-
-    // 8. Handle NaN in gradients
-    if (step::has_nan(pos_grads)) {
-      error->warning(FLERR, "SPIN-STEP: NaN detected in position gradients");
-      pos_grads = step::replace_nan(pos_grads);
-    }
-
-    bool has_nan_mag = step::has_nan(mag_grads);
-    if (has_nan_mag) {
-      mag_grads = step::replace_nan(mag_grads, impl_->last_valid_mag_grads);
-    }
-
-    // Cache valid gradients
-    if (!has_nan_mag) {
-      impl_->last_valid_mag_grads = mag_grads.detach().clone();
-      impl_->has_valid_grads = true;
-    }
-
-    if (vflag_global && step::has_nan(eps_grads)) {
-      error->warning(FLERR, "SPIN-STEP: NaN detected in strain gradients");
-      eps_grads = step::replace_nan(eps_grads);
-    }
-
-    // 9. Compute forces (negative gradient of energy)
-    auto forces_tensor = -pos_grads;
-
-    // 10. Magnetic forces: conditionally project to perpendicular direction
-    auto full_mag_forces = -mag_grads;  // full (unprojected) for longitudinal dynamics
-    torch::Tensor mag_forces_tensor;
-    if (impl_->project_target_mag_force) {
-      mag_forces_tensor = step::project_forces_perpendicular(full_mag_forces, magmoms);
-    } else {
-      mag_forces_tensor = full_mag_forces;
-    }
-
-    // Handle NaN after projection
-    bool has_nan_projected = step::has_nan(mag_forces_tensor);
-    if (has_nan_projected) {
-      mag_forces_tensor = step::replace_nan(mag_forces_tensor, impl_->last_valid_projected_forces);
-    }
-
-    // Cache valid projected forces
-    if (!has_nan_projected) {
-      impl_->last_valid_projected_forces = mag_forces_tensor.detach().clone();
-      impl_->has_valid_projected_forces = true;
-    }
-
-    // 11. Distribute atomic forces to LAMMPS arrays (only local atoms now)
-    auto forces_cpu = forces_tensor.cpu();
-    auto force_accessor = forces_cpu.accessor<float, 2>();
-
-    for (int i = 0; i < nlocal; i++) {
-      f[i][0] += static_cast<double>(force_accessor[i][0]);
-      f[i][1] += static_cast<double>(force_accessor[i][1]);
-      f[i][2] += static_cast<double>(force_accessor[i][2]);
-    }
-
-    // 11b. Tally the configurational virial from the homogeneous strain derivative.
-    // This matches pre_modelv7_plusstress.py: the TorchScript model returns energies only,
-    // while stress/virial are obtained externally from dE/deps with x' = x * (I + eps).
-    // Under this convention, dE/deps_ab = -virial_ab in LAMMPS ordering.
-    if (vflag_global) {
-      auto eps_cpu = eps_grads.cpu();
-      auto eacc = eps_cpu.accessor<float, 2>();
-      virial[0] += -static_cast<double>(eacc[0][0]);
-      virial[1] += -static_cast<double>(eacc[1][1]);
-      virial[2] += -static_cast<double>(eacc[2][2]);
-      virial[3] += -static_cast<double>(eacc[0][1]);
-      virial[4] += -static_cast<double>(eacc[0][2]);
-      virial[5] += -static_cast<double>(eacc[1][2]);
-    }
-
-    // 12. Distribute magnetic forces (only local atoms now)
-    auto mag_forces_cpu = mag_forces_tensor.cpu();
-    auto mag_accessor = mag_forces_cpu.accessor<float, 2>();
-
-    // Apply to fm array: fm += mag * projected_force / hbar
-    for (int i = 0; i < nlocal; i++) {
-      double mag = sp[i][3];
-      if (mag > 1e-10) {
-        fm[i][0] += mag * static_cast<double>(mag_accessor[i][0]) / hbar;
-        fm[i][1] += mag * static_cast<double>(mag_accessor[i][1]) / hbar;
-        fm[i][2] += mag * static_cast<double>(mag_accessor[i][2]) / hbar;
+    const int batch = batch_size_ ? batch_size_ : std::max(nlocal, 1);
+    const bool strain = mechanical && vflag_global;
+    for (int first = 0; first < nlocal; first += batch) {
+      const int count = std::min(batch, nlocal - first);
+      auto graph = impl_->build_graph(list, atom, first, count, halo_layers_,
+                                      cutoff_, comm->nprocs == 1);
+      const int nnodes = graph.atoms.size();
+      auto positions = torch::empty({nnodes, 3}, torch::kFloat32);
+      auto magmoms = torch::empty_like(positions);
+      auto numbers = torch::empty({nnodes}, torch::kInt64);
+      auto pa = positions.accessor<float, 2>();
+      auto ma = magmoms.accessor<float, 2>();
+      auto na = numbers.accessor<int64_t, 1>();
+      // Translate each graph near zero before float32 conversion, preserving
+      // resolution for large simulation boxes. Translation does not change E.
+      const int origin = graph.atoms[0];
+      for (int ni = 0; ni < nnodes; ++ni) {
+        const int i = graph.atoms[ni];
+        na[ni] = impl_->atom_types_map.at(step::element_to_number(elements_[atom->type[i]-1]));
+        for (int d = 0; d < 3; ++d) {
+          pa[ni][d] = atom->x[i][d] - atom->x[origin][d];
+          ma[ni][d] = atom->sp[i][d] * atom->sp[i][3];
+        }
       }
-    }
-
-    // 13. Cache magnetic forces for compute_single_pair
-    impl_->cached_mag_forces = mag_forces_cpu.detach().clone();
-    impl_->cached_full_mag_forces = full_mag_forces.cpu().detach().clone();
-    forces_cached_ = true;
-
-    // 14. Energy bookkeeping
-    if (eflag_global) {
-      eng_vdwl = total_energy.item<double>();
-    }
-
-    if (eflag_atom) {
-      auto atomic_e = atomic_energies.cpu();
-      auto e_accessor = atomic_e.accessor<float, 2>();
-      for (int i = 0; i < nlocal; i++) {
-        eatom[i] = e_accessor[i][0];
+      const int64_t nedges = graph.edges.size();
+      auto edges = torch::empty({2, nedges}, torch::kInt64);
+      auto shifts = torch::empty({nedges, 3}, torch::kFloat32);
+      auto ea = edges.accessor<int64_t, 2>();
+      auto sa = shifts.accessor<float, 2>();
+      for (int64_t e = 0; e < nedges; ++e) {
+        ea[0][e] = graph.edges[e][0];
+        ea[1][e] = graph.edges[e][1];
+        for (int d = 0; d < 3; ++d) sa[e][d] = graph.shifts[e][d];
       }
-    }
-
-  } catch (const c10::Error &e) {
-    error->all(FLERR, "PyTorch error in SPIN-STEP compute: {}", e.what());
+      positions = positions.to(impl_->device).set_requires_grad(mechanical);
+      magmoms = magmoms.to(impl_->device).set_requires_grad(true);
+      shifts = shifts.to(impl_->device);
+      torch::Tensor eps;
+      auto pos_def = positions;
+      if (strain) {
+        eps = torch::zeros({3, 3}, positions.options()).set_requires_grad(true);
+        auto def = torch::eye(3, positions.options()) + eps;
+        pos_def = torch::matmul(positions, def);
+        shifts = torch::matmul(shifts, def);
+      }
+      c10::Dict<std::string, torch::Tensor> data;
+      data.insert("pos", pos_def);
+      data.insert("magmoms", magmoms);
+      data.insert("numbers", numbers.to(impl_->device));
+      data.insert("edge_index", edges.to(impl_->device));
+      data.insert("shifts", shifts);
+      auto atomic = impl_->model.forward({data}).toTensor();
+      if (atomic.dim() < 1 || atomic.size(0) != nnodes || atomic.numel() != nnodes)
+        throw std::runtime_error("STEP model must return one energy per input node");
+      auto owned = atomic.narrow(0, 0, count).reshape({count});
+      if (!torch::isfinite(owned).all().item<bool>())
+        throw std::runtime_error("Non-finite STEP energy");
+      // Never sum ghost energies. Keep isolated-atom/on-site energies too.
+      auto energy = owned.sum();
+      std::vector<torch::Tensor> inputs = {magmoms};
+      if (mechanical) inputs.push_back(positions);
+      if (strain) inputs.push_back(eps);
+      std::vector<torch::Tensor> grads(inputs.size());
+      if (energy.requires_grad())
+        grads = torch::autograd::grad({energy}, inputs, {}, false, false, true);
+      for (size_t k = 0; k < grads.size(); ++k) {
+        if (!grads[k].defined()) grads[k] = torch::zeros_like(inputs[k]);
+        if (!torch::isfinite(grads[k]).all().item<bool>())
+          throw std::runtime_error("Non-finite STEP gradient");
+      }
+      auto mag_cpu = (-grads[0]).to(torch::kCPU).contiguous();
+      auto ga = mag_cpu.accessor<float, 2>();
+      for (int ni = 0; ni < nnodes; ++ni)
+        for (int d = 0; d < 3; ++d)
+          impl_->contributions[graph.atoms[ni]][3+d] += ga[ni][d];
+      if (mechanical) {
+        auto f_cpu = (-grads[1]).to(torch::kCPU).contiguous();
+        auto fa = f_cpu.accessor<float, 2>();
+        for (int ni = 0; ni < nnodes; ++ni)
+          for (int d = 0; d < 3; ++d)
+            impl_->contributions[graph.atoms[ni]][d] += fa[ni][d];
+        if (eflag_global) eng_vdwl += energy.item<double>();
+        if (eflag_atom) {
+          auto e_cpu = owned.to(torch::kCPU).contiguous();
+          auto values = e_cpu.accessor<float, 1>();
+          for (int k = 0; k < count; ++k) eatom[first+k] += values[k];
+        }
+        if (strain) {
+          auto vir = (-grads[2]).to(torch::kCPU).contiguous();
+          auto va = vir.accessor<float, 2>();
+          virial[0] += va[0][0]; virial[1] += va[1][1]; virial[2] += va[2][2];
+          virial[3] += va[0][1]; virial[4] += va[0][2]; virial[5] += va[1][2];
+        }
+      }
+    }  // Autograd graph released after every batch.
   } catch (const std::exception &e) {
-    error->all(FLERR, "Error in SPIN-STEP compute: {}", e.what());
+    // A rank-local failure must abort MPI, not strand peers in reverse_comm.
+    error->one(FLERR, "SPIN-STEP evaluation failed: {}", e.what());
   }
+  comm->reverse_comm(this);
+  impl_->cached_full_mag_forces = torch::empty({nlocal, 3}, torch::kFloat32);
+  auto full = impl_->cached_full_mag_forces.accessor<float, 2>();
+  auto moments = torch::empty({nlocal, 3}, torch::kFloat32);
+  auto ma = moments.accessor<float, 2>();
+  for (int i = 0; i < nlocal; ++i) {
+    for (int d = 0; d < 3; ++d) {
+      if (mechanical) atom->f[i][d] += impl_->contributions[i][d];
+      full[i][d] = impl_->contributions[i][3+d];
+      ma[i][d] = atom->sp[i][d] * atom->sp[i][3];
+    }
+  }
+  // Project only after summing the full gradient, and keep the full field for
+  // longitudinal SIB dynamics. No STEP contribution is left in ghost f/fm.
+  impl_->cached_mag_forces = impl_->project_target_mag_force ?
+      step::project_forces_perpendicular(impl_->cached_full_mag_forces, moments) :
+      impl_->cached_full_mag_forces;
+  forces_cached_ = true;
+}
+
+int PairSpinSTEP::pack_forward_comm(int n, int *indices, double *buf, int, int *)
+{
+  int k = 0;
+  for (int i = 0; i < n; ++i)
+    for (int d = 0; d < 4; ++d) buf[k++] = atom->sp[indices[i]][d];
+  return k;
+}
+
+void PairSpinSTEP::unpack_forward_comm(int n, int first, double *buf)
+{
+  int k = 0;
+  for (int i = first; i < first+n; ++i)
+    for (int d = 0; d < 4; ++d) atom->sp[i][d] = buf[k++];
+}
+
+int PairSpinSTEP::pack_reverse_comm(int n, int first, double *buf)
+{
+  int k = 0;
+  for (int i = first; i < first+n; ++i)
+    for (int d = 0; d < 6; ++d) buf[k++] = impl_->contributions[i][d];
+  return k;
+}
+
+void PairSpinSTEP::unpack_reverse_comm(int n, int *indices, double *buf)
+{
+  int k = 0;
+  for (int i = 0; i < n; ++i)
+    for (int d = 0; d < 6; ++d) impl_->contributions[indices[i]][d] += buf[k++];
 }
 
 // =============================================================================
@@ -771,6 +699,8 @@ void PairSpinSTEP::compute(int eflag, int vflag)
 
 void PairSpinSTEP::compute_single_pair(int ii, double fmi[3])
 {
+  if (comm->nprocs > 1)
+    error->one(FLERR, "MPI spin/step does not support per-atom spin sweeps; use a SIB integrator");
   static int single_pair_calls = 0;
   static int cached_nmagnetic = 0;
   static bigint last_step = -1;
@@ -825,108 +755,7 @@ void PairSpinSTEP::compute_single_pair(int ii, double fmi[3])
 
 void PairSpinSTEP::recompute_forces()
 {
-  if (!model_loaded_) {
-    return;
-  }
-
-  double **x = atom->x;
-  double **sp = atom->sp;
-  int *type = atom->type;
-  tagint *tag = atom->tag;
-  int nlocal = atom->nlocal;
-  int nghost = atom->nghost;
-  int ntotal = nlocal + nghost;
-
-  try {
-    // Only convert local atoms (shifts handle periodic boundaries)
-    auto positions = impl_->convert_positions(x, nlocal);
-    auto numbers = impl_->convert_types(type, nlocal, elements_);
-    auto magmoms = impl_->convert_spins_to_magmoms(sp, nlocal);
-
-    // Only need gradients for magnetic moments
-    positions.set_requires_grad(false);
-    magmoms.set_requires_grad(true);
-
-    double rc_sq = cutoff_ * cutoff_;
-    auto neighbors = impl_->build_neighbor_list(list, nlocal, ntotal, x, rc_sq, tag, atom);
-
-    if (neighbors.n_pairs == 0) {
-      impl_->cached_mag_forces = torch::zeros({nlocal, 3}, torch::kFloat32);
-      impl_->cached_full_mag_forces = torch::zeros({nlocal, 3}, torch::kFloat32);
-      forces_cached_ = true;
-      return;
-    }
-
-    // Build input dictionary
-    c10::Dict<std::string, torch::Tensor> data_dict;
-    data_dict.insert("pos", positions);
-    data_dict.insert("numbers", numbers);
-    data_dict.insert("magmoms", magmoms);
-    data_dict.insert("edge_index", neighbors.edge_index);
-    data_dict.insert("shifts", neighbors.shifts);
-
-    std::vector<torch::jit::IValue> inputs;
-    inputs.push_back(data_dict);
-    auto atomic_energies = impl_->model.forward(inputs).toTensor();
-
-    // Check for NaN in energies
-    if (step::has_nan(atomic_energies)) {
-      error->warning(FLERR, "SPIN-STEP recompute_forces: NaN detected in atomic energies");
-    }
-
-    auto total_energy = atomic_energies.sum();
-
-    auto grads = torch::autograd::grad(
-        {total_energy},
-        {magmoms},
-        /*grad_outputs=*/{},
-        /*retain_graph=*/false,
-        /*create_graph=*/false,
-        /*allow_unused=*/true);
-
-    auto mag_grads = grads[0];
-
-    // Handle NaN
-    bool has_nan_mag = step::has_nan(mag_grads);
-    if (has_nan_mag) {
-      mag_grads = step::replace_nan(mag_grads, impl_->last_valid_mag_grads);
-    }
-    if (!has_nan_mag) {
-      impl_->last_valid_mag_grads = mag_grads.detach().clone();
-      impl_->has_valid_grads = true;
-    }
-
-    // Conditionally project to perpendicular direction
-    auto full_mag_forces = -mag_grads;  // full (unprojected) for longitudinal dynamics
-    torch::Tensor mag_forces_tensor;
-    if (impl_->project_target_mag_force) {
-      mag_forces_tensor = step::project_forces_perpendicular(full_mag_forces, magmoms);
-    } else {
-      mag_forces_tensor = full_mag_forces;
-    }
-
-    // Handle NaN after projection
-    bool has_nan_projected = step::has_nan(mag_forces_tensor);
-    if (has_nan_projected) {
-      mag_forces_tensor = step::replace_nan(mag_forces_tensor, impl_->last_valid_projected_forces);
-    }
-    if (!has_nan_projected) {
-      impl_->last_valid_projected_forces = mag_forces_tensor.detach().clone();
-      impl_->has_valid_projected_forces = true;
-    }
-
-    // Cache magnetic forces (only local atoms now, no ghost accumulation needed)
-    impl_->cached_mag_forces = mag_forces_tensor.cpu().detach().clone();
-    impl_->cached_full_mag_forces = full_mag_forces.cpu().detach().clone();
-    forces_cached_ = true;
-
-  } catch (const c10::Error &e) {
-    error->warning(FLERR, "PyTorch error in SPIN-STEP recompute_forces: {}", e.what());
-    forces_cached_ = false;
-  } catch (const std::exception &e) {
-    error->warning(FLERR, "Error in SPIN-STEP recompute_forces: {}", e.what());
-    forces_cached_ = false;
-  }
+  evaluate(false, 0, 0);
 }
 
 // =============================================================================
