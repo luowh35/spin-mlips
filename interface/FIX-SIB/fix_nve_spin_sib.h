@@ -29,6 +29,9 @@
         - NN call #2: compute omega(s_mid)
         - Corrector: s^{n+1/2}
      3. x^{n+1} = x^n + dt * v^{n+1/2}              [position full step]
+   [LAMMPS migrates atoms and refreshes neighbors]
+
+   pre_force():
      4. SIB spin update (dt/2):                      [second half spin step]
 
    [LAMMPS calls pair->compute() for new forces]
@@ -68,6 +71,7 @@ class FixNVESpinSIB : public FixNVESpin {
   void init() override;
   void setup(int) override;
   void initial_integrate(int) override;
+  void pre_force(int) override;
   void final_integrate() override;
 
  protected:

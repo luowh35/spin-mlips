@@ -1,8 +1,10 @@
 # STEP 多进程 / 多 GPU 测试版
 
 本版实现了 MPI 区域分解、完整磁力回传，以及限制 GPU 显存峰值的分批求导。
-本地已通过 LAMMPS 2 Aug 2023 Update 3 + LibTorch 2.9.1 的 C++ 编译和链接。
-**尚未完成 MPI 数值回归或多张物理 GPU 验证，请先验收小体系，再进行生产模拟。**
+本地已通过 LAMMPS 2 Aug 2023 Update 3 + LibTorch 2.9.1 的 C++ 编译和链接，
+以及 CPU 上 1/2/4 MPI rank 的数值回归（含真实 Fe STEP 模型）。
+**本机仅有一张物理 GPU，尚未验证多张 GPU 的绑定、显存分配和加速比。**
+详细验证范围见 `tests/VALIDATION.md`。
 
 ## 安装
 
@@ -14,7 +16,11 @@ SIB 接口的 LAMMPS，以及与服务器 CUDA 环境匹配的 GPU 版 LibTorch�
 同时更新 `src/USER-SPIN-STEP/` 中相应文件（如存在），避免再次安装包时覆盖新版。
 保留当前可运行的旧二进制，然后按原有配置重新编译 LAMMPS。
 **必须让使用 pair_spin_step.h 的文件也重新编译，包括 force.cpp；不要仅替换一个 .o。**
-`FIX-SIB` 代码本次没有修改；服务器仍需安装它提供的 SIB 积分器和 pair_spin_ml.h。
+**2026-09-11 修订还修改了 FIX-SIB，必须同时升级**
+`fix_nve_spin_sib.cpp/.h` 和 `fix_nh_spin_sib.cpp/.h`，
+并重新编译其派生类 `fix_nvt_spin_sib.cpp`、`fix_npt_spin_sib.cpp`。
+修复了 setup 时重复累加力，以及在旧邻居表上计算移动后的第二个自旋半步的问题。
+服务器仍需安装本目录依赖的 `pair_spin_ml.h`。
 
 本仓库顶层的 `Install.sh` 是另一个组件的 CPU 依赖下载脚本，不用于本次升级。
 
@@ -49,14 +55,15 @@ fix         integrate all nve/spin/sib lattice moving
   每批还需要中心的多层邻居，故实际 GPU 节点数通常超过 N。
 - `halo_layers L`：默认读取模型 `config.json` 的 `num_layers`。
   旧模型缺少该字段时必须明确提供真实消息传递层数，不能为了节约显存缩小它。
-  `r_max` 元数据也必须与模型一致。
+  `config.json` 中必须包含与模型一致的正数 `r_max`，不再默认为 5 Å。
 
 代码针对当前 STEP/MagNequIP 导出的局域原子能量模型：每层传播一跳，输出每个
 输入节点的能量。全局注意力、跨原子归一化等非局域模型不满足这个分解假设。
 
 MPI 模式不支持原版 `fix nve/spin` 的逐原子自旋扫描；请使用
-`nve/spin/sib`、`nvt/spin/sib` 或 `npt/spin/sib`。本次测试脚本覆盖 nve/spin/sib，
-含纵向 glangevin/spin/sib 的路径；其他积分器也应在服务器分别验收。
+`nve/spin/sib`、`nvt/spin/sib` 或 `npt/spin/sib`。测试脚本覆盖 nve/spin/sib，
+含纵向 glangevin/spin/sib 路径，并检查 NVT/NPT 的初始化和两个自旋半步。
+NPT 长时间变胞轨迹仍需在服务器验收。不支持 rRESPA。
 保持默认 `comm_modify mode single`，不支持 `neigh_modify include`。
 全局 virial 可计算；本次没有实现逐原子 virial，勿将 stress/atom 用作已验证输出。
 
@@ -93,7 +100,8 @@ python interface/USER-SPIN-STEP/tests/test_mpi.py \
 脚本创建一个非线性三层模型，以独立完整周期图的 PyTorch 能量和导数为参考，比较
 1/2/4 MPI rank、无分批/小批次、正交/倾斜周期盒、空 rank、孤立原子，以及短程 SIB
 横向/纵向轨迹。失败时保留输入、日志和 dump，并以非零状态退出。
-该测试是新编写的待运行测试，不能代替服务器实际运行结果。
+另有 SIB 初始化重复加力、跨进程迁移和新邻居出现的回归测试。
+本机 CPU 回归已经通过；服务器应重新运行以验收自己的构建和模型。
 
 随后在分配到四张 GPU 的环境测试：
 
@@ -108,4 +116,5 @@ python interface/USER-SPIN-STEP/tests/test_mpi.py \
 全局压力。FP32 与不同求和顺序会有小误差，要求数值接近，不要求逐位相同。
 
 先比较固定构型 `run 0`，再比较无随机热浴的短轨迹，最后逐步增加体系规模。
+非零温度随机热浴在不同 rank 数下通常使用不同随机序列，不应要求逐原子轨迹一致。
 反馈问题时请保留模型元数据、输入文件、完整 stdout/log.lammps、rank 数和每卡显存。

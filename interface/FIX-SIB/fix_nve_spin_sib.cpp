@@ -34,6 +34,8 @@
 #include "pair_spin.h"
 #include "update.h"
 
+#include <array>
+#include <vector>
 #include <cmath>
 #include <cstring>
 
@@ -147,6 +149,7 @@ int FixNVESpinSIB::setmask()
 {
   int mask = 0;
   mask |= INITIAL_INTEGRATE;
+  mask |= PRE_FORCE;
   mask |= FINAL_INTEGRATE;
   return mask;
 }
@@ -155,6 +158,9 @@ int FixNVESpinSIB::setmask()
 
 void FixNVESpinSIB::init()
 {
+  if (utils::strmatch(update->integrate_style, "^respa"))
+    error->all(FLERR, "Fix nve/spin/sib does not support rRESPA");
+
   // Set timesteps
   dtv = update->dt;
   dtf = 0.5 * update->dt * force->ftm2v;
@@ -311,10 +317,10 @@ void FixNVESpinSIB::init()
 
 /* ---------------------------------------------------------------------- */
 
-void FixNVESpinSIB::setup(int vflag)
+void FixNVESpinSIB::setup(int /*vflag*/)
 {
-  // Initial force computation
-  if (pair_spin_ml) pair_spin_ml->compute(1, 1);
+  // Verlet setup has already computed forces and populated the ML cache.
+  // Calling compute() again here would double the initial atomic/magnetic forces.
 }
 
 /* ---------------------------------------------------------------------- */
@@ -380,8 +386,8 @@ void FixNVESpinSIB::initial_integrate(int /*vflag*/)
     }
   }
 
-  // ========== Step 4: Second SIB half-step for spin (dt/2) ==========
-  sib_spin_half_step();
+  // The second spin half-step runs in pre_force(), after migration and
+  // neighbor rebuilding at the new positions.
 }
 
 /* ----------------------------------------------------------------------
@@ -396,6 +402,9 @@ void FixNVESpinSIB::sib_spin_half_step()
   int nlocal = atom->nlocal;
   if (igroup == atom->firstgroup) nlocal = atom->nfirst;
   int *mask = atom->mask;
+
+  // Migration between the two half-steps may increase this rank's atom count.
+  if (nlocal > nlocal_max) grow_arrays();
 
   // --- Step A: Save current spins and initialize noise ---
   for (int i = 0; i < nlocal; i++) {
@@ -580,6 +589,20 @@ void FixNVESpinSIB::sib_spin_half_step()
 }
 
 /* ---------------------------------------------------------------------- */
+
+// Complete the spin splitting after LAMMPS refreshes the new-coordinate halo.
+// Preserve existing pre_force contributions: the SIB solver uses fm as scratch,
+// and pair->compute() will subsequently add the final-state magnetic force.
+void FixNVESpinSIB::pre_force(int /*vflag*/)
+{
+  const int nall = atom->nlocal + atom->nghost;
+  std::vector<std::array<double, 3>> saved_fm(nall);
+  for (int i = 0; i < nall; ++i)
+    for (int d = 0; d < 3; ++d) saved_fm[i][d] = atom->fm[i][d];
+  sib_spin_half_step();
+  for (int i = 0; i < nall; ++i)
+    for (int d = 0; d < 3; ++d) atom->fm[i][d] = saved_fm[i][d];
+}
 
 void FixNVESpinSIB::final_integrate()
 {

@@ -200,3 +200,17 @@ run           10000
 
 [3] P.-W. Ma, S.L. Dudarev, "Longitudinal magnetic fluctuations in Langevin
     spin dynamics", Phys. Rev. B 86, 054416 (2012).
+
+
+### 2026-09-11: MPI STEP integration correction
+
+Update both `fix_nve_spin_sib.cpp/.h` and `fix_nh_spin_sib.cpp/.h`, and rebuild
+NVT/NPT subclasses when upgrading USER-SPIN-STEP. Setup now uses the forces
+already computed by LAMMPS instead of adding a second ML force evaluation.
+The second SIB half-step runs in `pre_force`, after atom migration, box updates
+and neighbor rebuilding. Scratch magnetic fields are restored before the final
+pair-force evaluation to avoid double accumulation. Scratch arrays grow after
+migration if needed. The splitting order remains spin-half / position-full /
+spin-half; only the LAMMPS callback boundary changes. rRESPA is not supported.
+
+CPU MPI regressions are provided in `../USER-SPIN-STEP/tests/test_mpi.py`.

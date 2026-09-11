@@ -89,7 +89,7 @@ struct LAMMPS_NS::PairSpinSTEPImpl {
 
   PairSpinSTEPImpl() : device(torch::kCPU) {
     // Default configuration
-    r_max = 5.0;
+    r_max = -1.0;  // never guess a cutoff: an undersized halo silently loses forces
     num_types = 1;
     num_features = 64;
     lmax = 2;
@@ -257,13 +257,13 @@ void PairSpinSTEP::settings(int narg, char **arg)
     } else {
       impl_->device = torch::Device(device);
       if (!impl_->device.is_cpu() && !impl_->device.is_cuda())
-        error->all(FLERR, "spin/step device must be auto, cpu, or cuda:N");
+        error->one(FLERR, "spin/step device must be auto, cpu, or cuda:N");
       if (impl_->device.is_cuda() && (!torch::cuda::is_available() ||
           !impl_->device.has_index() || impl_->device.index() >= torch::cuda::device_count()))
-        error->all(FLERR, "spin/step CUDA device is unavailable; use a visible cuda:N index");
+        error->one(FLERR, "spin/step CUDA device is unavailable; use a visible cuda:N index");
     }
   } catch (const c10::Error &e) {
-    error->all(FLERR, "Invalid spin/step device: {}", e.what());
+    error->one(FLERR, "Invalid spin/step device: {}", e.what());
   }
   if (comm->me == 0)
     utils::logmesg(lmp, "SPIN-STEP: {} MPI rank(s), rank 0 device {}, batch_size={}\n",
@@ -445,8 +445,8 @@ void PairSpinSTEP::load_model(const std::string &path)
     if (comm->me == 0) {
       utils::logmesg(lmp, "SPIN-STEP: TorchScript model loaded successfully\n");
     }
-  } catch (const c10::Error &e) {
-    error->all(FLERR, "Failed to load TorchScript model: {}", e.what());
+  } catch (const std::exception &e) {
+    error->one(FLERR, "Failed to load TorchScript model: {}", e.what());
   }
 }
 

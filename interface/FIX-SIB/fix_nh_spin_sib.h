@@ -34,6 +34,7 @@ class FixNHSpinSIB : public FixNH {
   void init() override;
   void setup(int) override;
   void initial_integrate(int) override;
+  void pre_force(int) override;
   void final_integrate() override;
 
   int lattice_flag;    // 0 = frozen lattice, 1 = moving lattice

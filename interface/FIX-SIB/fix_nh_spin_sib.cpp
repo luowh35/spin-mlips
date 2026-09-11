@@ -38,6 +38,8 @@
 #include "pair_spin_ml.h"
 #include "update.h"
 
+#include <array>
+#include <vector>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -171,6 +173,7 @@ int FixNHSpinSIB::setmask()
 {
   int mask = 0;
   mask |= INITIAL_INTEGRATE;
+  mask |= PRE_FORCE;
   mask |= FINAL_INTEGRATE;
   if (pre_exchange_flag) mask |= PRE_EXCHANGE;
   return mask;
@@ -304,7 +307,7 @@ void FixNHSpinSIB::init()
 void FixNHSpinSIB::setup(int vflag)
 {
   FixNH::setup(vflag);
-  if (pair_spin_ml) pair_spin_ml->compute(1, 1);
+  // FixNH::setup consumes the forces already computed by Verlet setup.
 }
 
 void FixNHSpinSIB::grow_arrays()
@@ -356,7 +359,21 @@ void FixNHSpinSIB::initial_integrate(int /*vflag*/)
     if (kspace_flag) force->kspace->setup();
   }
 
+  // Finish the spin update in pre_force() after box/neighbor communication.
+}
+
+// Complete the spin splitting after LAMMPS refreshes the new-coordinate halo.
+// Preserve existing pre_force contributions: the SIB solver uses fm as scratch,
+// and pair->compute() will subsequently add the final-state magnetic force.
+void FixNHSpinSIB::pre_force(int /*vflag*/)
+{
+  const int nall = atom->nlocal + atom->nghost;
+  std::vector<std::array<double, 3>> saved_fm(nall);
+  for (int i = 0; i < nall; ++i)
+    for (int d = 0; d < 3; ++d) saved_fm[i][d] = atom->fm[i][d];
   sib_spin_half_step();
+  for (int i = 0; i < nall; ++i)
+    for (int d = 0; d < 3; ++d) atom->fm[i][d] = saved_fm[i][d];
 }
 
 void FixNHSpinSIB::final_integrate()
